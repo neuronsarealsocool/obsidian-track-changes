@@ -57,6 +57,13 @@
     await instance.flushAll();
   } finally {cm?.destroy();mount.remove();}
   await instance.archive.idle();
+  instance.schedule('shutdown-fixture.md','Pending text at unload');
+  instance.onunload();
+  const handoff=globalThis[Symbol.for('obsidian-track-changes.archive-handoffs')]?.get(root);
+  assert(handoff instanceof Promise,'Reload handoff exposes the final flush promise');
+  await handoff;
+  const restarted=new real.archive.constructor(root);await restarted.init();
+  assert(restarted.get('shutdown-fixture.md')?.content==='Pending text at unload','Reload handoff preserves pending text before the next scan');
   const result={passed:checked.length,checks:checked,isolatedArchive:root,installedReady:real.ready};
   await require('fs').promises.writeFile(require('path').join(root,'result.json'),JSON.stringify(result,null,2));
   return result;

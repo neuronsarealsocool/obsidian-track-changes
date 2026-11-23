@@ -8,6 +8,10 @@ import {Archive,Revision} from './storage';
 import {acceptOne,Change,changes,rejectOne} from './changes';
 
 const VIEW='track-changes-review';
+// Obsidian does not await unload hooks. Share the final flush promise across
+// module reloads so the next instance scans only after the old writer finishes.
+const handoffKey=Symbol.for('obsidian-track-changes.archive-handoffs');
+const handoffs:Map<string,Promise<unknown>>=(globalThis as any)[handoffKey]??=((new Map<string,Promise<unknown>>()));
 interface Settings {archiveDirectory:string;highlights:boolean;saveDelayMs:number}
 interface Pending {content:string;first:number;last:number}
 class DeletedText extends WidgetType {
@@ -31,7 +35,7 @@ export default class TrackChanges extends Plugin {
     this.addCommand({id:'checkpoint',name:'Save a named checkpoint',editorCallback:(editor,view)=>{if(view.file)new NameModal(this.app,'Name this checkpoint',label=>this.capture(view.file!.path,editor.getValue(),'checkpoint',{label})).open();}});
     this.addCommand({id:'toggle-highlights',name:'Toggle inline change highlights',callback:()=>{this.settings.highlights=!this.settings.highlights;void this.saveData(this.settings);this.refreshEditors();new Notice(`Track Changes highlights ${this.settings.highlights?'on':'off'}`);}});
     const status=this.addStatusBarItem();status.setText('Track Changes: loading');
-    try{await this.archive.init();this.ready=true;}catch(error){this.report(error);status.setText('Track Changes: archive error');return;}
+    try{await handoffs.get(this.archive.root);handoffs.delete(this.archive.root);await this.archive.init();this.ready=true;}catch(error){this.report(error);status.setText('Track Changes: archive error');return;}
     this.registerEvent(this.app.vault.on('modify',file=>{if(file instanceof TFile&&file.extension==='md')void this.captureDisk(file);}));
     this.registerEvent(this.app.vault.on('create',file=>{if(file instanceof TFile&&file.extension==='md')void this.captureDisk(file);}));
     this.registerEvent(this.app.workspace.on('file-open',file=>{if(file?.extension==='md')void this.captureDisk(file);this.refreshViews();}));
@@ -138,7 +142,7 @@ export default class TrackChanges extends Plugin {
     const name=`${basename} (recovered ${new Date().toISOString().replace(/[:.]/g,'-')}).md`;
     const file=await this.app.vault.create(name,revision.content);await this.capture(file.path,revision.content,'recovered-copy');await this.app.workspace.getLeaf(false).openFile(file);new Notice('Recovered as a new note. Original note preserved.');
   }
-  onunload(){this.stopped=true;void this.flushAll().catch(e=>this.report(e));}
+  onunload(){this.stopped=true;if(this.archive){const finished=this.flushAll().catch(e=>this.report(e));handoffs.set(this.archive.root,finished);}}
 }
 
 function button(parent:HTMLElement,text:string,action:()=>unknown,primary=false){const b=parent.createEl('button',{text,cls:primary?'mod-cta':''});b.addEventListener('click',()=>{b.disabled=true;Promise.resolve().then(action).catch(e=>new Notice(String(e),9000)).finally(()=>b.disabled=false);});return b;}

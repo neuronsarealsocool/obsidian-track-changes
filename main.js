@@ -646,6 +646,8 @@ function rejectOne(current, change) {
 
 // src/main.ts
 var VIEW = "track-changes-review";
+var handoffKey = Symbol.for("obsidian-track-changes.archive-handoffs");
+var handoffs = globalThis[handoffKey] ??= /* @__PURE__ */ new Map();
 var DeletedText = class extends import_view.WidgetType {
   constructor(text) {
     super();
@@ -692,6 +694,8 @@ var TrackChanges = class extends import_obsidian.Plugin {
     const status = this.addStatusBarItem();
     status.setText("Track Changes: loading");
     try {
+      await handoffs.get(this.archive.root);
+      handoffs.delete(this.archive.root);
       await this.archive.init();
       this.ready = true;
     } catch (error) {
@@ -932,7 +936,10 @@ var TrackChanges = class extends import_obsidian.Plugin {
   }
   onunload() {
     this.stopped = true;
-    void this.flushAll().catch((e) => this.report(e));
+    if (this.archive) {
+      const finished = this.flushAll().catch((e) => this.report(e));
+      handoffs.set(this.archive.root, finished);
+    }
   }
 };
 function button(parent, text, action, primary = false) {
