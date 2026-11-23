@@ -1,0 +1,17 @@
+.tc-review {padding:var(--size-4-4);overflow-y:auto;}
+.tc-review h2 {margin-top:0;}
+.tc-review h3 {overflow-wrap:anywhere;margin-top:var(--size-4-5);}
+.tc-caption {color:var(--text-muted);font-size:var(--font-ui-small);}
+.tc-tools {display:flex;gap:var(--size-4-2);flex-wrap:wrap;margin:var(--size-4-3) 0;}
+.tc-change {padding:var(--size-4-3);border:1px solid var(--background-modifier-border);border-radius:var(--radius-m);margin:var(--size-4-3) 0;}
+.tc-change strong,.tc-change ins,.tc-change del {display:block;white-space:pre-wrap;overflow-wrap:anywhere;}
+.tc-addition,.tc-change ins,.tc-diff ins {background:rgba(var(--color-green-rgb),.18);text-decoration:underline;text-decoration-color:var(--color-green);}
+.tc-deletion,.tc-change del,.tc-diff del {background:rgba(var(--color-red-rgb),.13);text-decoration:line-through;color:var(--text-muted);}
+.tc-deletion {white-space:pre-wrap;user-select:none;}
+.tc-history,.tc-note-list {display:flex;flex-direction:column;gap:var(--size-4-1);max-height:320px;overflow-y:auto;margin-top:var(--size-4-2);}
+.tc-history button,.tc-note-list button {text-align:left;white-space:normal;height:auto;min-height:30px;justify-content:flex-start;}
+.tc-diff {white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-text);padding:var(--size-4-3);background:var(--background-secondary);border-radius:var(--radius-m);}
+.tc-diff pre {white-space:pre-wrap;}
+.tc-review input {width:100%;}
+.tc-error {color:var(--text-error);}
+.tc-archive-path {overflow-wrap:anywhere;user-select:text;font-family:var(--font-monospace);}
