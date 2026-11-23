@@ -669,6 +669,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
   pending = /* @__PURE__ */ new Map();
   lastError = "";
   lastNotice = 0;
+  stopped = false;
   async onload() {
     this.settings = { ...this.settings, ...await this.loadData() };
     this.settings.saveDelayMs = Math.max(200, Math.min(5e3, Number(this.settings.saveDelayMs) || 800));
@@ -754,7 +755,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
   async captureDisk(file) {
     try {
       const notePath = file.path, content = await this.app.vault.read(file);
-      if (file.path !== notePath) return;
+      if (this.stopped || file.path !== notePath) return;
       const editor = this.editorFor(notePath);
       const live = editor?.getValue();
       if (live !== void 0 && live !== content) {
@@ -791,13 +792,18 @@ var TrackChanges = class extends import_obsidian.Plugin {
   }
   async seed() {
     for (const file of this.app.vault.getMarkdownFiles()) {
+      if (this.stopped) return;
       if (!this.archive.get(file.path)) await this.captureDisk(file);
       else {
         const content = await this.app.vault.read(file);
+        if (this.stopped) return;
         if (content !== this.archive.get(file.path)?.content) await this.captureDisk(file);
       }
     }
-    for (const r of [...this.archive.docs.values()]) if (!r.deleted && !this.app.vault.getAbstractFileByPath(r.path)) await this.markDeleted(r.path);
+    for (const r of [...this.archive.docs.values()]) {
+      if (this.stopped) return;
+      if (!r.deleted && !this.app.vault.getAbstractFileByPath(r.path)) await this.markDeleted(r.path);
+    }
     this.refreshEditors();
   }
   async renamePath(oldPath, newPath) {
@@ -844,6 +850,10 @@ var TrackChanges = class extends import_obsidian.Plugin {
       await leaf.setViewState({ type: VIEW, active: true });
     }
     await this.app.workspace.revealLeaf(leaf);
+  }
+  // Allows the isolated integration harness to use Obsidian's own CM state field.
+  get editorContextField() {
+    return import_obsidian.editorInfoField;
   }
   extension() {
     const plugin = this;
@@ -921,6 +931,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
     new import_obsidian.Notice("Recovered as a new note. Original note preserved.");
   }
   onunload() {
+    this.stopped = true;
     void this.flushAll().catch((e) => this.report(e));
   }
 };

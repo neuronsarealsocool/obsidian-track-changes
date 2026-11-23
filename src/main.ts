@@ -17,7 +17,7 @@ class DeletedText extends WidgetType {
 }
 export default class TrackChanges extends Plugin {
   settings:Settings={archiveDirectory:path.join(os.homedir(),'Obsidian Track Changes History'),highlights:true,saveDelayMs:800};
-  archive!:Archive; ready=false; pending=new Map<string,Pending>();lastError='';private lastNotice=0;
+  archive!:Archive; ready=false; pending=new Map<string,Pending>();lastError='';private lastNotice=0;private stopped=false;
   async onload(){
     this.settings={...this.settings,...await this.loadData()};
     this.settings.saveDelayMs=Math.max(200,Math.min(5000,Number(this.settings.saveDelayMs)||800));
@@ -56,7 +56,7 @@ export default class TrackChanges extends Plugin {
     try{const prior=this.archive.get(notePath)?.baseline;const r=await this.archive.save(notePath,content,kind,options);this.lastError='';if(prior!==r.baseline)this.refreshEditors();this.refreshViews();return r;}catch(e){this.report(e);throw e;}
   }
   async captureDisk(file:TFile){
-    try{const notePath=file.path,content=await this.app.vault.read(file);if(file.path!==notePath)return;
+    try{const notePath=file.path,content=await this.app.vault.read(file);if(this.stopped||file.path!==notePath)return;
       // An open editor can be ahead of the on-disk save event.
       const editor=this.editorFor(notePath);const live=editor?.getValue();
       if(live!==undefined&&live!==content){this.schedule(notePath,live);return;}
@@ -69,11 +69,12 @@ export default class TrackChanges extends Plugin {
   async flushAll(){for(const p of [...this.pending.keys()])await this.flushPath(p);await this.archive.idle();}
   async seed(){
     for(const file of this.app.vault.getMarkdownFiles()){
+      if(this.stopped)return;
       if(!this.archive.get(file.path))await this.captureDisk(file);
-      else {const content=await this.app.vault.read(file);if(content!==this.archive.get(file.path)?.content)await this.captureDisk(file);}
+      else {const content=await this.app.vault.read(file);if(this.stopped)return;if(content!==this.archive.get(file.path)?.content)await this.captureDisk(file);}
     }
     // Notes removed while Obsidian was closed remain recoverable.
-    for(const r of [...this.archive.docs.values()])if(!r.deleted&&!this.app.vault.getAbstractFileByPath(r.path))await this.markDeleted(r.path);
+    for(const r of [...this.archive.docs.values()]){if(this.stopped)return;if(!r.deleted&&!this.app.vault.getAbstractFileByPath(r.path))await this.markDeleted(r.path);}
     this.refreshEditors();
   }
   async renamePath(oldPath:string,newPath:string){try{await this.flushPath(oldPath);const old=this.archive.get(oldPath);if(old)await this.capture(newPath,old.content,'rename',{docId:old.docId,oldPath});}catch(e){this.report(e);}}
@@ -84,6 +85,8 @@ export default class TrackChanges extends Plugin {
   refreshViews(){for(const leaf of this.app.workspace.getLeavesOfType(VIEW))(leaf.view as ReviewView).requestRefresh();}
   refreshEditors(){for(const leaf of this.app.workspace.getLeavesOfType('markdown')){const editor=(leaf.view as MarkdownView).editor as unknown as {cm?:EditorView};editor.cm?.dispatch({});}}
   async openReview(){let leaf=this.app.workspace.getLeavesOfType(VIEW)[0];if(!leaf){leaf=this.app.workspace.getRightLeaf(false)!;await leaf.setViewState({type:VIEW,active:true});}await this.app.workspace.revealLeaf(leaf);}
+  // Allows the isolated integration harness to use Obsidian's own CM state field.
+  get editorContextField(){return editorInfoField;}
   extension(){
     const plugin=this;
     return ViewPlugin.fromClass(class {
@@ -135,7 +138,7 @@ export default class TrackChanges extends Plugin {
     const name=`${basename} (recovered ${new Date().toISOString().replace(/[:.]/g,'-')}).md`;
     const file=await this.app.vault.create(name,revision.content);await this.capture(file.path,revision.content,'recovered-copy');await this.app.workspace.getLeaf(false).openFile(file);new Notice('Recovered as a new note. Original note preserved.');
   }
-  onunload(){void this.flushAll().catch(e=>this.report(e));}
+  onunload(){this.stopped=true;void this.flushAll().catch(e=>this.report(e));}
 }
 
 function button(parent:HTMLElement,text:string,action:()=>unknown,primary=false){const b=parent.createEl('button',{text,cls:primary?'mod-cta':''});b.addEventListener('click',()=>{b.disabled=true;Promise.resolve().then(action).catch(e=>new Notice(String(e),9000)).finally(()=>b.disabled=false);});return b;}
