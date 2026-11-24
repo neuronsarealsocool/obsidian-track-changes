@@ -672,6 +672,8 @@ var TrackChanges = class extends import_obsidian.Plugin {
   lastError = "";
   lastNotice = 0;
   stopped = false;
+  startupTimer;
+  startup;
   async onload() {
     this.settings = { ...this.settings, ...await this.loadData() };
     this.settings.saveDelayMs = Math.max(200, Math.min(5e3, Number(this.settings.saveDelayMs) || 800));
@@ -693,10 +695,24 @@ var TrackChanges = class extends import_obsidian.Plugin {
     } });
     const status = this.addStatusBarItem();
     status.setText("Track Changes: loading");
+    this.app.workspace.onLayoutReady(() => {
+      if (this.stopped) return;
+      this.startupTimer = window.setTimeout(() => {
+        this.startupTimer = void 0;
+        this.startup = this.startTracking(status).catch((error) => {
+          this.ready = false;
+          this.report(error);
+          status.setText("Track Changes: startup error");
+        });
+      }, 0);
+    });
+  }
+  async startTracking(status) {
     try {
       await handoffs.get(this.archive.root);
       handoffs.delete(this.archive.root);
       await this.archive.init();
+      if (this.stopped) return;
       this.ready = true;
     } catch (error) {
       this.report(error);
@@ -732,7 +748,8 @@ var TrackChanges = class extends import_obsidian.Plugin {
     }, 300));
     this.registerDomEvent(window, "blur", () => void this.flushAll());
     void this.seed().catch((e) => this.report(e));
-    this.app.workspace.onLayoutReady(() => this.refreshEditors());
+    this.refreshEditors();
+    this.refreshViews();
   }
   report(error) {
     console.error("Track Changes", error);
@@ -839,12 +856,15 @@ var TrackChanges = class extends import_obsidian.Plugin {
     return this.editorFor(notePath)?.getValue() ?? this.pending.get(notePath)?.content ?? this.archive.get(notePath)?.content ?? "";
   }
   refreshViews() {
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW)) leaf.view.requestRefresh();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW)) {
+      const view = leaf.view;
+      if (typeof view.requestRefresh === "function") view.requestRefresh();
+    }
   }
   refreshEditors() {
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const editor = leaf.view.editor;
-      editor.cm?.dispatch({});
+      editor?.cm?.dispatch({});
     }
   }
   async openReview() {
@@ -867,6 +887,9 @@ var TrackChanges = class extends import_obsidian.Plugin {
         this.build();
       }
       decorations = import_view.Decoration.none;
+      lastBaseline;
+      lastText;
+      lastHighlights;
       update(update) {
         const file = update.state.field(import_obsidian.editorInfoField, false)?.file;
         if (update.docChanged && file) {
@@ -878,11 +901,15 @@ var TrackChanges = class extends import_obsidian.Plugin {
       }
       build() {
         const notePath = this.view.state.field(import_obsidian.editorInfoField, false)?.file?.path, baseline = notePath ? plugin.archive.get(notePath)?.baseline : void 0;
+        const current = this.view.state.doc.toString();
+        if (this.lastBaseline === baseline && this.lastText === current && this.lastHighlights === plugin.settings.highlights) return;
+        this.lastBaseline = baseline;
+        this.lastText = current;
+        this.lastHighlights = plugin.settings.highlights;
         if (!plugin.settings.highlights || baseline === void 0) {
           this.decorations = import_view.Decoration.none;
           return;
         }
-        const current = this.view.state.doc.toString();
         if (current.length + baseline.length > 15e4) {
           this.decorations = import_view.Decoration.none;
           return;
@@ -936,8 +963,9 @@ var TrackChanges = class extends import_obsidian.Plugin {
   }
   onunload() {
     this.stopped = true;
+    window.clearTimeout(this.startupTimer);
     if (this.archive) {
-      const finished = this.flushAll().catch((e) => this.report(e));
+      const finished = (this.startup ?? Promise.resolve()).then(() => this.flushAll()).catch((e) => this.report(e));
       handoffs.set(this.archive.root, finished);
     }
   }

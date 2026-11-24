@@ -22,6 +22,7 @@ class DeletedText extends WidgetType {
 export default class TrackChanges extends Plugin {
   settings:Settings={archiveDirectory:path.join(os.homedir(),'Obsidian Track Changes History'),highlights:true,saveDelayMs:800};
   archive!:Archive; ready=false; pending=new Map<string,Pending>();lastError='';private lastNotice=0;private stopped=false;
+  private startupTimer?:number;private startup?:Promise<void>;
   async onload(){
     this.settings={...this.settings,...await this.loadData()};
     this.settings.saveDelayMs=Math.max(200,Math.min(5000,Number(this.settings.saveDelayMs)||800));
@@ -35,7 +36,12 @@ export default class TrackChanges extends Plugin {
     this.addCommand({id:'checkpoint',name:'Save a named checkpoint',editorCallback:(editor,view)=>{if(view.file)new NameModal(this.app,'Name this checkpoint',label=>this.capture(view.file!.path,editor.getValue(),'checkpoint',{label})).open();}});
     this.addCommand({id:'toggle-highlights',name:'Toggle inline change highlights',callback:()=>{this.settings.highlights=!this.settings.highlights;void this.saveData(this.settings);this.refreshEditors();new Notice(`Track Changes highlights ${this.settings.highlights?'on':'off'}`);}});
     const status=this.addStatusBarItem();status.setText('Track Changes: loading');
-    try{await handoffs.get(this.archive.root);handoffs.delete(this.archive.root);await this.archive.init();this.ready=true;}catch(error){this.report(error);status.setText('Track Changes: archive error');return;}
+    // Restored sidebar leaves may still be DeferredViews during startup.
+    // Let Obsidian finish its layout before scanning an existing archive.
+    this.app.workspace.onLayoutReady(()=>{if(this.stopped)return;this.startupTimer=window.setTimeout(()=>{this.startupTimer=undefined;this.startup=this.startTracking(status).catch(error=>{this.ready=false;this.report(error);status.setText('Track Changes: startup error');});},0);});
+  }
+  private async startTracking(status:HTMLElement){
+    try{await handoffs.get(this.archive.root);handoffs.delete(this.archive.root);await this.archive.init();if(this.stopped)return;this.ready=true;}catch(error){this.report(error);status.setText('Track Changes: archive error');return;}
     this.registerEvent(this.app.vault.on('modify',file=>{if(file instanceof TFile&&file.extension==='md')void this.captureDisk(file);}));
     this.registerEvent(this.app.vault.on('create',file=>{if(file instanceof TFile&&file.extension==='md')void this.captureDisk(file);}));
     this.registerEvent(this.app.workspace.on('file-open',file=>{if(file?.extension==='md')void this.captureDisk(file);this.refreshViews();}));
@@ -52,7 +58,7 @@ export default class TrackChanges extends Plugin {
     this.registerDomEvent(window,'blur',()=>void this.flushAll());
     // Register listeners before seeding, so edits during the initial scan are captured.
     void this.seed().catch(e=>this.report(e));
-    this.app.workspace.onLayoutReady(()=>this.refreshEditors());
+    this.refreshEditors();this.refreshViews();
   }
   report(error:unknown){console.error('Track Changes',error);this.lastError=String(error);if(Date.now()-this.lastNotice>10000){new Notice(`Track Changes could not save history: ${String(error)}. Existing history was preserved.`,12000);this.lastNotice=Date.now();}}
   async capture(notePath:string,content:string,kind='edit',options:Parameters<Archive['save']>[3]={}){
@@ -86,8 +92,8 @@ export default class TrackChanges extends Plugin {
   async markDeleted(notePath:string){try{await this.flushPath(notePath);const old=this.archive.get(notePath);if(old)await this.capture(notePath,old.content,'delete',{docId:old.docId,deleted:true});}catch(e){this.report(e);}}
   editorFor(notePath:string){return this.app.workspace.getLeavesOfType('markdown').map(l=>l.view as MarkdownView).find(v=>v.file?.path===notePath)?.editor;}
   current(notePath:string){return this.editorFor(notePath)?.getValue()??this.pending.get(notePath)?.content??this.archive.get(notePath)?.content??'';}
-  refreshViews(){for(const leaf of this.app.workspace.getLeavesOfType(VIEW))(leaf.view as ReviewView).requestRefresh();}
-  refreshEditors(){for(const leaf of this.app.workspace.getLeavesOfType('markdown')){const editor=(leaf.view as MarkdownView).editor as unknown as {cm?:EditorView};editor.cm?.dispatch({});}}
+  refreshViews(){for(const leaf of this.app.workspace.getLeavesOfType(VIEW)){const view=leaf.view as unknown as {requestRefresh?:()=>void};if(typeof view.requestRefresh==='function')view.requestRefresh();}}
+  refreshEditors(){for(const leaf of this.app.workspace.getLeavesOfType('markdown')){const editor=(leaf.view as MarkdownView).editor as unknown as {cm?:EditorView}|undefined;editor?.cm?.dispatch({});}}
   async openReview(){let leaf=this.app.workspace.getLeavesOfType(VIEW)[0];if(!leaf){leaf=this.app.workspace.getRightLeaf(false)!;await leaf.setViewState({type:VIEW,active:true});}await this.app.workspace.revealLeaf(leaf);}
   // Allows the isolated integration harness to use Obsidian's own CM state field.
   get editorContextField(){return editorInfoField;}
@@ -95,6 +101,7 @@ export default class TrackChanges extends Plugin {
     const plugin=this;
     return ViewPlugin.fromClass(class {
       decorations:DecorationSet=Decoration.none;
+      private lastBaseline?:string;private lastText?:string;private lastHighlights?:boolean;
       constructor(readonly view:EditorView){this.build();}
       update(update:ViewUpdate){
         const file=update.state.field(editorInfoField,false)?.file;
@@ -106,8 +113,10 @@ export default class TrackChanges extends Plugin {
       }
       build(){
         const notePath=this.view.state.field(editorInfoField,false)?.file?.path,baseline=notePath?plugin.archive.get(notePath)?.baseline:undefined;
-        if(!plugin.settings.highlights||baseline===undefined){this.decorations=Decoration.none;return;}
         const current=this.view.state.doc.toString();
+        if(this.lastBaseline===baseline&&this.lastText===current&&this.lastHighlights===plugin.settings.highlights)return;
+        this.lastBaseline=baseline;this.lastText=current;this.lastHighlights=plugin.settings.highlights;
+        if(!plugin.settings.highlights||baseline===undefined){this.decorations=Decoration.none;return;}
         // Inline diffing is bounded; full history and review remain available for large notes.
         if(current.length+baseline.length>150000){this.decorations=Decoration.none;return;}
         const builder=new RangeSetBuilder<Decoration>();
@@ -142,7 +151,7 @@ export default class TrackChanges extends Plugin {
     const name=`${basename} (recovered ${new Date().toISOString().replace(/[:.]/g,'-')}).md`;
     const file=await this.app.vault.create(name,revision.content);await this.capture(file.path,revision.content,'recovered-copy');await this.app.workspace.getLeaf(false).openFile(file);new Notice('Recovered as a new note. Original note preserved.');
   }
-  onunload(){this.stopped=true;if(this.archive){const finished=this.flushAll().catch(e=>this.report(e));handoffs.set(this.archive.root,finished);}}
+  onunload(){this.stopped=true;window.clearTimeout(this.startupTimer);if(this.archive){const finished=(this.startup??Promise.resolve()).then(()=>this.flushAll()).catch(e=>this.report(e));handoffs.set(this.archive.root,finished);}}
 }
 
 function button(parent:HTMLElement,text:string,action:()=>unknown,primary=false){const b=parent.createEl('button',{text,cls:primary?'mod-cta':''});b.addEventListener('click',()=>{b.disabled=true;Promise.resolve().then(action).catch(e=>new Notice(String(e),9000)).finally(()=>b.disabled=false);});return b;}

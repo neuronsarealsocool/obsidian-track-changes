@@ -51,6 +51,14 @@ Your existing Edit History plugin can remain installed and keeps its own indepen
 
 ## Development
 
+### 0.1.2 startup fixes
+
+- Restored sidebar and Markdown leaves can be deferred by Obsidian. Refresh skips views that are not loaded yet, preventing `leaf.view.requestRefresh is not a function` during startup and file-open events.
+- The archive scan starts after the workspace layout is ready and the plugin startup hook returns. The status bar shows loading until tracking is ready.
+- Unloading cancels scheduled initialization or waits for initialization already in progress before handing off pending saves.
+- Inline decorations reuse their previous diff when the text, accepted baseline, and highlight setting are unchanged.
+- Regression tests cover deferred views, startup scheduling, and unloading before or during initialization.
+
 ```sh
 npm ci
 npm test
