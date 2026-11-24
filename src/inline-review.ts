@@ -1,5 +1,5 @@
 import {Notice,editorInfoField} from 'obsidian';
-import {EditorState,Range,StateField} from '@codemirror/state';
+import {EditorState,Range,StateEffect,StateEffectType,StateField} from '@codemirror/state';
 import {Decoration,DecorationSet,EditorView,ViewPlugin,ViewUpdate,WidgetType} from '@codemirror/view';
 import {Change,changes} from './changes';
 import {ReviewArea,reviewAreas} from './review-areas';
@@ -12,18 +12,18 @@ interface ReviewHost {
   applyChange:(path:string,expected:string,base:string,change:Change|undefined,accept:boolean)=>Promise<void>;
 }
 class DeletedText extends WidgetType {
-  constructor(readonly text:string){super();}
-  eq(other:DeletedText){return other.text===this.text;}
-  toDOM(){const span=document.createElement('span');span.className='tc-deletion';span.textContent=this.text;span.setAttribute('aria-label',`Deleted: ${this.text}`);return span;}
+  constructor(readonly text:string,readonly areaIndex:number){super();}
+  eq(other:DeletedText){return other.text===this.text&&other.areaIndex===this.areaIndex;}
+  toDOM(){const span=document.createElement('span');span.className='tc-deletion';span.textContent=this.text;span.dataset.tcArea=String(this.areaIndex);span.setAttribute('aria-label',`Deleted: ${this.text}`);return span;}
 }
 function preview(text:string){const value=text.replace(/\r?\n/g,' ↵ ');return value.trim()?value.length>130?`${value.slice(0,130)}…`:value:'Whitespace';}
 
 class ReviewBox extends WidgetType {
-  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number,readonly active:boolean){super();}
-  eq(other:ReviewBox){return this.host===other.host&&this.path===other.path&&this.base===other.base&&this.text===other.text&&this.index===other.index&&this.total===other.total&&this.active===other.active;}
+  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number,readonly reveal:StateEffectType<number|null>){super();}
+  eq(other:ReviewBox){return this.host===other.host&&this.path===other.path&&this.base===other.base&&this.text===other.text&&this.index===other.index&&this.total===other.total;}
   toDOM(view:EditorView){
-    const wrapper=document.createElement('div');wrapper.className='tc-inline-container';wrapper.contentEditable='false';
-    const card=document.createElement('div');card.className=`tc-inline-review${this.active?' is-active':''}`;card.setAttribute('role','group');card.setAttribute('aria-label',`Review change ${this.index+1} of ${this.total}`);card.dataset.changeIndex=String(this.index);card.dataset.from=String(this.area.from);wrapper.appendChild(card);
+    const wrapper=document.createElement('div');wrapper.className='tc-inline-container';wrapper.contentEditable='false';wrapper.dataset.tcArea=String(this.index);
+    const card=document.createElement('div');card.className='tc-inline-review is-active';card.setAttribute('role','group');card.setAttribute('aria-label',`Review change ${this.index+1} of ${this.total}`);card.dataset.changeIndex=String(this.index);card.dataset.from=String(this.area.from);wrapper.appendChild(card);
     const heading=document.createElement('div');heading.className='tc-inline-header';card.appendChild(heading);
     const title=document.createElement('span');title.className='tc-inline-title';title.textContent=this.area.removed?this.area.added?'Changed text':'Deleted text':'Added text';heading.appendChild(title);
     const count=document.createElement('span');count.className='tc-inline-count';count.textContent=`${this.index+1} of ${this.total}`;heading.appendChild(count);
@@ -53,7 +53,7 @@ class ReviewBox extends WidgetType {
     const navigate=(direction:number)=>{
       if(view.state.doc.toString()!==this.text||this.host.archive.get(this.path)?.baseline!==this.base){view.dispatch({});return;}
       const areas=reviewAreas(this.base,this.text),target=areas[this.index+direction];if(!target)return;
-      view.dispatch({selection:{anchor:target.from},effects:EditorView.scrollIntoView(Math.min(target.anchor,view.state.doc.length),{y:'center'})});view.focus();
+      view.dispatch({selection:{anchor:target.from},effects:[this.reveal.of(this.index+direction),EditorView.scrollIntoView(Math.min(target.anchor,view.state.doc.length),{y:'center'})]});view.focus();
     };
     addButton('← Previous','previous',()=>navigate(-1),this.index===0);
     addButton('Next →','next',()=>navigate(1),this.index===this.total-1);
@@ -64,30 +64,66 @@ class ReviewBox extends WidgetType {
   get estimatedHeight(){return 132;}
 }
 
-interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;active:number;areas:ReviewArea[];raw:Change[]}
+interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;hovered:number|null;areas:ReviewArea[];raw:Change[]}
 export function reviewExtension(host:ReviewHost){
-  function build(state:EditorState,previous?:ReviewState):ReviewState{
+  const reveal=StateEffect.define<number|null>();
+  function build(state:EditorState,previous?:ReviewState,requested:number|null=null):ReviewState{
     const path=state.field(editorInfoField,false)?.file?.path,base=path?host.archive.get(path)?.baseline:undefined;
     const text=state.doc.toString(),enabled=host.settings.highlights;
     const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled;
     const raw=unchanged?previous.raw:enabled&&base!==undefined&&text.length+base.length<=150000?changes(base,text,true):[];
     const areas=unchanged?previous.areas:base!==undefined?reviewAreas(base,text,raw):[];
-    const cursor=state.selection.main.head,active=areas.findIndex(a=>cursor>=a.from&&cursor<=a.anchor);
-    if(unchanged&&previous.active===active)return previous;
+    const hovered=unchanged&&requested!==null&&areas[requested]?requested:null;
+    if(unchanged&&previous.hovered===hovered)return previous;
     const ranges:Range<Decoration>[]=[];
     if(path&&base!==undefined&&areas.length){
+      let areaIndex=0;
       for(const c of raw){
-        if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed),side:-1}).range(c.from));
-        if(c.to>c.from)ranges.push(Decoration.mark({class:'tc-addition'}).range(c.from,c.to));
+        while(areaIndex<areas.length-1&&c.from>areas[areaIndex].to)areaIndex++;
+        if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed,areaIndex),side:-1}).range(c.from));
+        if(c.to>c.from)ranges.push(Decoration.mark({class:'tc-addition',attributes:{'data-tc-area':String(areaIndex)}}).range(c.from,c.to));
       }
-      for(const [index,area] of areas.entries())ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,index,areas.length,index===active),block:true,side:1}).range(state.doc.lineAt(area.anchor).to));
+      if(hovered!==null){const area=areas[hovered];ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length,reveal),block:true,side:1}).range(state.doc.lineAt(area.anchor).to));}
     }
-    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,active,areas,raw};
+    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,hovered,areas,raw};
   }
-  const field=StateField.define<ReviewState>({create:state=>build(state),update:(value,tr)=>build(tr.state,value),provide:f=>EditorView.decorations.from(f,value=>value.decorations)});
+  const field=StateField.define<ReviewState>({create:state=>build(state),update:(value,tr)=>{
+    let hovered=value.hovered;for(const effect of tr.effects)if(effect.is(reveal))hovered=effect.value;
+    return build(tr.state,value,hovered);
+  },provide:f=>EditorView.decorations.from(f,value=>value.decorations)});
   // Block widgets must be provided directly by a state field. Capture events
   // stay in a view plugin so rebuilding decorations never performs async work.
   const capture=ViewPlugin.fromClass(class {
+    private hideTimer?:ReturnType<typeof setTimeout>;
+    constructor(readonly view:EditorView){
+      view.dom.addEventListener('pointerover',this.enter);
+      view.dom.addEventListener('pointermove',this.enter);
+      view.dom.addEventListener('pointerout',this.leave);
+      view.dom.addEventListener('pointerleave',this.exit);
+    }
+    private index(target:EventTarget|null):number|null{
+      const element=(target as Element|null)?.closest?.('[data-tc-area]');
+      if(!element||!this.view.dom.contains(element))return null;
+      const index=Number((element as HTMLElement).dataset.tcArea);return Number.isInteger(index)?index:null;
+    }
+    private show(index:number|null){if(this.view.state.field(field).hovered!==index)this.view.dispatch({effects:reveal.of(index)});}
+    private cancel(){clearTimeout(this.hideTimer);this.hideTimer=undefined;}
+    private hide(){
+      if(this.hideTimer!==undefined||this.view.state.field(field).hovered===null)return;
+      // Allow the pointer to cross the small gap from text to the review box.
+      this.hideTimer=setTimeout(()=>{this.hideTimer=undefined;this.show(null);},250);
+    }
+    private enter=(event:PointerEvent)=>{const index=this.index(event.target);if(index!==null){this.cancel();this.show(index);}else this.hide();};
+    private leave=(event:PointerEvent)=>{
+      const current=this.view.state.field(field).hovered;
+      if(current===null)return;
+      if(this.index(event.relatedTarget)===current){this.cancel();return;}
+      // Navigation has already moved the open box; an old box leaving the DOM
+      // must not close the destination before the pointer reaches it.
+      if(this.index(event.target)===current)this.hide();
+    };
+    private exit=()=>this.hide();
+    destroy(){this.cancel();this.view.dom.removeEventListener('pointerover',this.enter);this.view.dom.removeEventListener('pointermove',this.enter);this.view.dom.removeEventListener('pointerout',this.leave);this.view.dom.removeEventListener('pointerleave',this.exit);}
     update(update:ViewUpdate){
       const file=update.state.field(editorInfoField,false)?.file;
       if(update.docChanged&&file){

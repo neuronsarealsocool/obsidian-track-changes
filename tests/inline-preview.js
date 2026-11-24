@@ -16,7 +16,7 @@
   const header=document.createElement('div');header.style.cssText='display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;';dialog.appendChild(header);
   const heading=document.createElement('h2');heading.textContent='Review changes in place';heading.style.margin='0';header.appendChild(heading);
   const close=document.createElement('button');close.textContent='Close';header.appendChild(close);
-  const label=document.createElement('p');label.textContent='Sample note · each changed paragraph gets its own review box';label.style.cssText='color:var(--text-muted);margin:0 0 12px;font-size:var(--font-ui-small);';dialog.appendChild(label);
+  const label=document.createElement('p');label.textContent='Sample note · hover over highlighted text to review its changes';label.style.cssText='color:var(--text-muted);margin:0 0 12px;font-size:var(--font-ui-small);';dialog.appendChild(label);
   const editorHost=document.createElement('div');editorHost.style.cssText='padding:16px;border-radius:6px;background:var(--background-secondary);font-family:var(--font-text);font-size:17px;line-height:1.65;';dialog.appendChild(editorHost);
   document.body.appendChild(dialog);dialog.showModal();
   const cm=new View({state:State.create({doc:base,extensions:[real.editorContextField.init(()=>({file:{path:'preview.md'}})),instance.extension()]}),parent:editorHost});

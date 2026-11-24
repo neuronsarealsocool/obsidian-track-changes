@@ -1,11 +1,11 @@
 # Track Changes for Obsidian
 
-Review edits without losing the text you replace. Additions appear underlined, deletions appear struck through, and a compact review box sits beneath each changed paragraph. Accept or reject that area's edits directly in the note, and use Previous / Next to jump between changed areas. The accepted version is separate from the revision archive: accepting an edit never removes its history.
+Review edits without losing the text you replace. Additions appear underlined and deletions appear struck through. Hover over changed text to reveal its compact review box beneath the paragraph. Accept or reject that area's edits directly in the note, and use Previous / Next to jump between changed areas. The accepted version is separate from the revision archive: accepting an edit never removes its history.
 
 ## Features
 
 - Inline tracking in Markdown Source mode and Live Preview.
-- A review box beneath each changed paragraph, with Accept, Reject, Previous change, and Next change controls.
+- Hover over changed text to reveal its review box, with Accept, Reject, Previous change, and Next change controls. Only one box is shown, and hidden boxes leave no blank space.
 - Whole-word highlights and short old/new previews, with edits in the same paragraph grouped into one review decision.
 - Review sidebar with Accept / Reject per change and Accept all / Reject all.
 - Automatic snapshots after 800 ms of inactivity, or at most 5 seconds during continuous typing; disk save events also capture changes.
@@ -29,8 +29,8 @@ For a manual installation, create `.obsidian/plugins/track-changes/` inside your
 ## Use
 
 1. Enable the plugin. It creates a first accepted version of each Markdown note as it scans the vault. It cannot reconstruct edits made before it was installed.
-2. Edit a note normally in Source mode or Live Preview. A review box appears beneath each paragraph that differs from the last accepted version.
-3. In the box, select **Accept** to keep that area's edits in the accepted version, or **Reject** to restore its earlier text. **Previous / Next** jump to the preceding or following changed area. Nearby edits in the same paragraph share one box; other changed paragraphs remain pending.
+2. Edit a note normally in Source mode or Live Preview. Hover over an underlined addition or struck-through deletion to open its review box. The box stays open while you move onto its buttons and closes shortly after you move away from both the text and the box. Moving the text cursor into a change does not open it.
+3. In the box, select **Accept** to keep that area's edits in the accepted version, or **Reject** to restore its earlier text. **Previous / Next** jump to the preceding or following changed area and reveal its controls. Nearby edits in the same paragraph share one box; other changed paragraphs remain pending.
 4. Use **Save a named checkpoint** before rewriting a section. Checkpoints remain in the revision list even if the text did not change.
 5. Open **Track Changes: Review tracked changes and history** from the command palette or the history ribbon icon for the complete revision browser and Accept all / Reject all. Select a revision to inspect its diff. **Recover as copy** creates a separate note; **Restore this version** saves the present text before replacing it.
 6. Select **Browse all notes** to find a deleted note and recover a copy.
