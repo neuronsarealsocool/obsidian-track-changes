@@ -1,15 +1,17 @@
 import {Notice,editorInfoField} from 'obsidian';
-import {EditorState,Range,StateEffect,StateEffectType,StateField} from '@codemirror/state';
+import {EditorState,Range,StateEffect,StateField} from '@codemirror/state';
 import {Decoration,DecorationSet,EditorView,ViewPlugin,ViewUpdate,WidgetType} from '@codemirror/view';
 import {Change,changes} from './changes';
 import {ReviewArea,reviewAreas} from './review-areas';
+import {AreaHistory,AreaHistorySource,areaRange,TextRange} from './area-history';
 
 interface ReviewHost {
   settings:{highlights:boolean};
-  archive:{get:(path:string)=>{baseline:string}|undefined};
+  archive:{get:(path:string)=>{baseline:string;docId:string}|undefined;list:AreaHistorySource['list'];load:AreaHistorySource['load']};
   capture:(path:string,text:string)=>Promise<unknown>;
   schedule:(path:string,text:string)=>void;
   applyChange:(path:string,expected:string,base:string,change:Change|undefined,accept:boolean)=>Promise<void>;
+  restoreAreaVersion:(path:string,expected:string,base:string,range:TextRange,text:string)=>Promise<void>;
 }
 class DeletedText extends WidgetType {
   constructor(readonly text:string,readonly areaIndex:number){super();}
@@ -19,22 +21,22 @@ class DeletedText extends WidgetType {
 function preview(text:string){const value=text.replace(/\r?\n/g,' ↵ ');return value.trim()?value.length>130?`${value.slice(0,130)}…`:value:'Whitespace';}
 
 class ReviewBox extends WidgetType {
-  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number,readonly reveal:StateEffectType<number|null>){super();}
+  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number){super();}
   eq(other:ReviewBox){return this.host===other.host&&this.path===other.path&&this.base===other.base&&this.text===other.text&&this.index===other.index&&this.total===other.total;}
   toDOM(view:EditorView){
     const wrapper=document.createElement('div');wrapper.className='tc-inline-container';wrapper.contentEditable='false';wrapper.dataset.tcArea=String(this.index);
     const card=document.createElement('div');card.className='tc-inline-review is-active';card.setAttribute('role','group');card.setAttribute('aria-label',`Review change ${this.index+1} of ${this.total}`);card.dataset.changeIndex=String(this.index);card.dataset.from=String(this.area.from);wrapper.appendChild(card);
     const heading=document.createElement('div');heading.className='tc-inline-header';card.appendChild(heading);
     const title=document.createElement('span');title.className='tc-inline-title';title.textContent=this.area.removed?this.area.added?'Changed text':'Deleted text':'Added text';heading.appendChild(title);
-    const count=document.createElement('span');count.className='tc-inline-count';count.textContent=`${this.index+1} of ${this.total}`;heading.appendChild(count);
+    const count=document.createElement('span');count.className='tc-inline-count';count.textContent='Pending edit';heading.appendChild(count);
     const summary=document.createElement('div');summary.className='tc-inline-preview';card.appendChild(summary);
     if(this.area.removed){const old=document.createElement('del');old.textContent=preview(this.area.removed);old.setAttribute('aria-label',`Previous text: ${this.area.removed}`);summary.appendChild(old);}
     if(this.area.added){const added=document.createElement('ins');added.textContent=preview(this.area.added);added.setAttribute('aria-label',`New text: ${this.area.added}`);summary.appendChild(added);}
     const controls=document.createElement('div');controls.className='tc-inline-controls';card.appendChild(controls);
-    const addButton=(label:string,action:string,run:()=>unknown,disabled=false)=>{
+    const addButton=(label:string,action:string,run:()=>unknown,disabled=false,parent=controls)=>{
       const button=document.createElement('button');button.type='button';button.textContent=label;button.dataset.action=action;button.disabled=disabled;
-      button.setAttribute('aria-label',action==='previous'?'Previous change':action==='next'?'Next change':`${label} this changed area`);
-      button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();void run();});controls.appendChild(button);return button;
+      button.setAttribute('aria-label',action==='previous'?'Previous revision of this area':action==='next'?'Next revision of this area':`${label} this changed area`);
+      button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();void run();});parent.appendChild(button);return button;
     };
     const decide=async(accept:boolean)=>{
       if(card.getAttribute('aria-busy')==='true')return;
@@ -50,13 +52,42 @@ class ReviewBox extends WidgetType {
     };
     addButton('Accept','accept',()=>decide(true)).classList.add('tc-inline-accept');
     addButton('Reject','reject',()=>decide(false));
-    const navigate=(direction:number)=>{
-      if(view.state.doc.toString()!==this.text||this.host.archive.get(this.path)?.baseline!==this.base){view.dispatch({});return;}
-      const areas=reviewAreas(this.base,this.text),target=areas[this.index+direction];if(!target)return;
-      view.dispatch({selection:{anchor:target.from},effects:[this.reveal.of(this.index+direction),EditorView.scrollIntoView(Math.min(target.anchor,view.state.doc.length),{y:'center'})]});view.focus();
+    const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area));
+    const section=document.createElement('div');section.className='tc-area-history';card.appendChild(section);
+    const historyTitle=document.createElement('div');historyTitle.className='tc-area-history-title';historyTitle.textContent='This area’s revisions';section.appendChild(historyTitle);
+    const status=document.createElement('div');status.className='tc-area-history-status';status.setAttribute('aria-live','polite');section.appendChild(status);
+    const version=document.createElement('pre');version.className='tc-area-version';section.appendChild(version);
+    const historyControls=document.createElement('div');historyControls.className='tc-inline-controls';section.appendChild(historyControls);
+    const note=document.createElement('div');note.className='tc-area-history-note';section.appendChild(note);
+    let loading=false;
+    const current=()=>view.state.doc.toString()===this.text&&this.host.archive.get(this.path)?.baseline===this.base;
+    const renderHistory=()=>{
+      status.textContent=loading?'Loading earlier revisions…':history.position===0?'Current text':`${history.selected.label?`${history.selected.label} · `:''}${new Date(history.selected.time!).toLocaleString()}`;
+      version.hidden=history.position===0;version.textContent=history.selected.text||'(Area not present in this revision)';
+      previous.disabled=loading||!history.hasOlder;next.disabled=loading||!history.hasNewer;
+      restore.hidden=history.position===0;restore.disabled=loading||history.selected.text===history.entries[0].text;
+      note.textContent=!history.hasOlder?history.stopReason:'';note.hidden=!note.textContent;
+      view.requestMeasure();
     };
-    addButton('← Previous','previous',()=>navigate(-1),this.index===0);
-    addButton('Next →','next',()=>navigate(1),this.index===this.total-1);
+    const browse=async(older:boolean)=>{
+      if(loading)return;if(!current()){view.dispatch({});return;}
+      loading=true;renderHistory();
+      try{if(older)await history.older(()=>card.isConnected&&current());else history.newer();}
+      catch(error){new Notice(`Could not load this area's revisions: ${String(error)}`,9000);}
+      finally{loading=false;if(card.isConnected)renderHistory();}
+    };
+    const useRevision=async()=>{
+      if(loading||history.position===0)return;
+      if(!current()){view.dispatch({});return;}
+      const enabled=Array.from(card.querySelectorAll<HTMLButtonElement>('button')).filter(b=>!b.disabled);enabled.forEach(b=>b.disabled=true);card.setAttribute('aria-busy','true');
+      try{await this.host.restoreAreaVersion(this.path,this.text,this.base,history.currentRange,history.selected.text);view.dispatch({});}
+      catch(error){new Notice(String(error),9000);}
+      finally{card.removeAttribute('aria-busy');enabled.forEach(b=>b.disabled=false);}
+    };
+    const previous=addButton('← Previous revision','previous',()=>browse(true),false,historyControls);
+    const next=addButton('Next revision →','next',()=>browse(false),true,historyControls);
+    const restore=addButton('Use this revision','restore-area',()=>useRevision(),true,historyControls);
+    renderHistory();
     return wrapper;
   }
   // Keep buttons keyboard-accessible while preventing editor selection on clicks.
@@ -83,7 +114,7 @@ export function reviewExtension(host:ReviewHost){
         if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed,areaIndex),side:-1}).range(c.from));
         if(c.to>c.from)ranges.push(Decoration.mark({class:'tc-addition',attributes:{'data-tc-area':String(areaIndex)}}).range(c.from,c.to));
       }
-      if(hovered!==null){const area=areas[hovered];ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length,reveal),block:true,side:1}).range(state.doc.lineAt(area.anchor).to));}
+      if(hovered!==null){const area=areas[hovered];ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length),block:true,side:1}).range(state.doc.lineAt(area.anchor).to));}
     }
     return {decorations:Decoration.set(ranges,true),text,base,path,enabled,hovered,areas,raw};
   }
@@ -118,8 +149,6 @@ export function reviewExtension(host:ReviewHost){
       const current=this.view.state.field(field).hovered;
       if(current===null)return;
       if(this.index(event.relatedTarget)===current){this.cancel();return;}
-      // Navigation has already moved the open box; an old box leaving the DOM
-      // must not close the destination before the pointer reaches it.
       if(this.index(event.target)===current)this.hide();
     };
     private exit=()=>this.hide();

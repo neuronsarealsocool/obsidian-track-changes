@@ -7,6 +7,7 @@ import {Archive,Revision} from './storage';
 import {acceptOne,Change,rejectOne} from './changes';
 import {reviewExtension} from './inline-review';
 import {reviewAreas} from './review-areas';
+import {TextRange} from './area-history';
 
 const VIEW='track-changes-review';
 // Obsidian does not await unload hooks. Share the final flush promise across
@@ -114,6 +115,12 @@ export default class TrackChanges extends Plugin {
     else{const file=this.app.vault.getAbstractFileByPath(notePath);if(!(file instanceof TFile))throw Error('Note no longer exists. Use Recover as copy.');await this.app.vault.process(file,current=>{if(current!==expected)throw Error('The note changed. Nothing was replaced.');return next;});}
     this.pending.delete(notePath);await this.capture(notePath,next,kind);
   }
+  async restoreAreaVersion(notePath:string,expected:string,base:string,range:TextRange,text:string){
+    if(this.current(notePath)!==expected||this.archive.get(notePath)?.baseline!==base)throw Error('The note changed while browsing revisions. Open its updated review box.');
+    if(range.from<0||range.to<range.from||range.to>expected.length)throw Error('Invalid area boundary.');
+    const next=expected.slice(0,range.from)+text+expected.slice(range.to);
+    await this.replaceSafely(notePath,expected,next,'restore-area');this.refreshEditors();this.refreshViews();
+  }
   async recoverCopy(revision:Revision){
     const basename=revision.path.split('/').pop()?.replace(/\.md$/i,'')||'Recovered note';
     const name=`${basename} (recovered ${new Date().toISOString().replace(/[:.]/g,'-')}).md`;
@@ -216,7 +223,7 @@ class TrackSettings extends PluginSettingTab {
   constructor(app:App,readonly plugin:TrackChanges){super(app,plugin);}
   display(){const root=this.containerEl,p=this.plugin;root.empty();root.createEl('h2',{text:'Track Changes'});
     root.createEl('p',{text:'History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version.'});
-    new Setting(root).setName('Inline highlights and review boxes').setDesc('Show word highlights and an Accept / Reject / Previous / Next box beneath each changed paragraph.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{p.settings.highlights=value;await p.saveData(p.settings);p.refreshEditors();}));
+    new Setting(root).setName('Inline highlights and review boxes').setDesc('Show word highlights, Accept / Reject controls, and Previous / Next revisions of the hovered area.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{p.settings.highlights=value;await p.saveData(p.settings);p.refreshEditors();}));
     let directory=p.settings.archiveDirectory;
     new Setting(root).setName('Archive directory').setDesc('Absolute folder outside the vault. A separate subfolder is used for each vault. Changing it requires a plugin reload; move the existing vault history folder yourself to keep continuity.').addText(t=>t.setValue(directory).onChange(value=>{directory=value.trim();})).addButton(b=>b.setButtonText('Save for next reload').onClick(async()=>{if(!path.isAbsolute(directory)){new Notice('Choose an absolute folder path.');return;}p.settings.archiveDirectory=directory;await p.saveData(p.settings);new Notice('Saved. Reload the plugin to use this directory. Existing history has not been moved.');}));
     root.createEl('p',{text:`Active archive: ${p.archive?.root??'Not initialized'}`,cls:'tc-archive-path'});

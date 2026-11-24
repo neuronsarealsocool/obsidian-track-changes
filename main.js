@@ -665,6 +665,127 @@ function reviewAreas(base, current, edits = changes(base, current, true)) {
   return areas;
 }
 
+// src/area-history.ts
+function areaRange(text, area) {
+  if (area.from === area.to) return { from: area.from, to: area.to };
+  let from = 0;
+  const separators = /\r?\n[\t ]*\r?\n/g;
+  let match;
+  while ((match = separators.exec(text)) && match.index + match[0].length <= area.from) from = match.index + match[0].length;
+  return { from, to: area.anchor };
+}
+function mapAreaRange(newer, older, range) {
+  if (range.from < 0 || range.to < range.from || range.to > newer.length) throw Error("Invalid area range");
+  const edits = changes(newer, older, true);
+  for (const c of edits) {
+    const crossesStart = c.oldFrom < range.from && c.oldTo > range.from && newer.slice(c.oldFrom, range.from).trim() !== "";
+    const crossesEnd = c.oldFrom < range.to && c.oldTo > range.to && newer.slice(range.to, c.oldTo).trim() !== "";
+    if (crossesStart || crossesEnd) return { reason: "An earlier rewrite also changed surrounding text. Its area cannot be isolated safely." };
+  }
+  function position(offset, side) {
+    let delta = 0;
+    for (const c of edits) {
+      if (offset < c.oldFrom) break;
+      if (c.oldFrom === c.oldTo && offset === c.oldFrom) return side > 0 ? c.to : c.from;
+      if (offset <= c.oldTo) {
+        if (offset === c.oldFrom) return c.from;
+        if (offset === c.oldTo) return c.to;
+        return side > 0 ? c.from : c.to;
+      }
+      delta += c.to - c.from - (c.oldTo - c.oldFrom);
+    }
+    return offset + delta;
+  }
+  let from = position(range.from, 1), to = position(range.to, -1);
+  if (range.from === range.to) {
+    const restored = edits.find((c) => c.oldFrom === range.from && c.oldTo === range.to);
+    if (restored) {
+      from = restored.from;
+      to = restored.to;
+    }
+  }
+  if (from > to) return { reason: "The older area boundary is ambiguous." };
+  const currentText = newer.slice(range.from, range.to), oldText = older.slice(from, to);
+  const overlaps = edits.some((c) => c.oldFrom < range.to && c.oldTo > range.from);
+  const repeated = (document2, value) => !!value && document2.indexOf(value) !== document2.lastIndexOf(value);
+  if (overlaps && (repeated(newer, currentText) || repeated(older, oldText))) return { reason: "Repeated text makes this earlier area ambiguous. Use the full-note history to compare it." };
+  return { range: { from, to } };
+}
+var AreaHistory = class {
+  constructor(source, path3, text, currentRange) {
+    this.source = source;
+    this.currentRange = currentRange;
+    this.docId = source.get(path3)?.docId;
+    this.document = text;
+    this.range = { ...currentRange };
+    this.entries = [{ text: text.slice(currentRange.from, currentRange.to), kind: "current" }];
+    if (!this.docId) {
+      this.finished = true;
+      this.stopReason = "No saved revisions for this area yet.";
+    }
+  }
+  entries;
+  position = 0;
+  finished = false;
+  stopReason = "";
+  document;
+  range;
+  names;
+  cursor = 0;
+  docId;
+  get selected() {
+    return this.entries[this.position];
+  }
+  get hasNewer() {
+    return this.position > 0;
+  }
+  get hasOlder() {
+    return this.position < this.entries.length - 1 || !this.finished;
+  }
+  newer() {
+    if (this.hasNewer) this.position--;
+    return this.selected;
+  }
+  async older(keepReading = () => true) {
+    if (this.position < this.entries.length - 1) {
+      this.position++;
+      return this.selected;
+    }
+    if (this.finished || !this.docId) return this.selected;
+    this.names ??= await this.source.list(this.docId);
+    while (this.cursor < this.names.length) {
+      if (!keepReading()) return this.selected;
+      const revision = await this.source.load(this.docId, this.names[this.cursor]);
+      this.cursor++;
+      if (!keepReading()) return this.selected;
+      if (revision.content === this.document) continue;
+      const mapped = mapAreaRange(this.document, revision.content, this.range);
+      if (!mapped.range) {
+        this.finished = true;
+        this.stopReason = mapped.reason;
+        return this.selected;
+      }
+      this.document = revision.content;
+      this.range = mapped.range;
+      const text = revision.content.slice(this.range.from, this.range.to);
+      if (text === this.entries.at(-1).text) continue;
+      this.entries.push({ text, time: revision.time, id: revision.id, label: revision.label, kind: revision.kind });
+      this.position++;
+      if (this.range.from === this.range.to) {
+        this.finished = true;
+        this.stopReason = "This area was not present in earlier saved versions.";
+      } else if (this.cursor === this.names.length) {
+        this.finished = true;
+        this.stopReason = "No earlier revisions of this area.";
+      }
+      return this.selected;
+    }
+    this.finished = true;
+    this.stopReason = "No earlier revisions of this area.";
+    return this.selected;
+  }
+};
+
 // src/inline-review.ts
 var DeletedText = class extends import_view.WidgetType {
   constructor(text, areaIndex) {
@@ -689,7 +810,7 @@ function preview(text) {
   return value.trim() ? value.length > 130 ? `${value.slice(0, 130)}\u2026` : value : "Whitespace";
 }
 var ReviewBox = class extends import_view.WidgetType {
-  constructor(host, path3, base, text, area, index, total, reveal) {
+  constructor(host, path3, base, text, area, index, total) {
     super();
     this.host = host;
     this.path = path3;
@@ -698,7 +819,6 @@ var ReviewBox = class extends import_view.WidgetType {
     this.area = area;
     this.index = index;
     this.total = total;
-    this.reveal = reveal;
   }
   eq(other) {
     return this.host === other.host && this.path === other.path && this.base === other.base && this.text === other.text && this.index === other.index && this.total === other.total;
@@ -724,7 +844,7 @@ var ReviewBox = class extends import_view.WidgetType {
     heading.appendChild(title);
     const count = document.createElement("span");
     count.className = "tc-inline-count";
-    count.textContent = `${this.index + 1} of ${this.total}`;
+    count.textContent = "Pending edit";
     heading.appendChild(count);
     const summary = document.createElement("div");
     summary.className = "tc-inline-preview";
@@ -744,19 +864,19 @@ var ReviewBox = class extends import_view.WidgetType {
     const controls = document.createElement("div");
     controls.className = "tc-inline-controls";
     card.appendChild(controls);
-    const addButton = (label, action, run, disabled = false) => {
+    const addButton = (label, action, run, disabled = false, parent = controls) => {
       const button2 = document.createElement("button");
       button2.type = "button";
       button2.textContent = label;
       button2.dataset.action = action;
       button2.disabled = disabled;
-      button2.setAttribute("aria-label", action === "previous" ? "Previous change" : action === "next" ? "Next change" : `${label} this changed area`);
+      button2.setAttribute("aria-label", action === "previous" ? "Previous revision of this area" : action === "next" ? "Next revision of this area" : `${label} this changed area`);
       button2.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
         void run();
       });
-      controls.appendChild(button2);
+      parent.appendChild(button2);
       return button2;
     };
     const decide = async (accept) => {
@@ -777,18 +897,82 @@ var ReviewBox = class extends import_view.WidgetType {
     };
     addButton("Accept", "accept", () => decide(true)).classList.add("tc-inline-accept");
     addButton("Reject", "reject", () => decide(false));
-    const navigate = (direction) => {
-      if (view.state.doc.toString() !== this.text || this.host.archive.get(this.path)?.baseline !== this.base) {
+    const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area));
+    const section = document.createElement("div");
+    section.className = "tc-area-history";
+    card.appendChild(section);
+    const historyTitle = document.createElement("div");
+    historyTitle.className = "tc-area-history-title";
+    historyTitle.textContent = "This area\u2019s revisions";
+    section.appendChild(historyTitle);
+    const status = document.createElement("div");
+    status.className = "tc-area-history-status";
+    status.setAttribute("aria-live", "polite");
+    section.appendChild(status);
+    const version = document.createElement("pre");
+    version.className = "tc-area-version";
+    section.appendChild(version);
+    const historyControls = document.createElement("div");
+    historyControls.className = "tc-inline-controls";
+    section.appendChild(historyControls);
+    const note = document.createElement("div");
+    note.className = "tc-area-history-note";
+    section.appendChild(note);
+    let loading = false;
+    const current = () => view.state.doc.toString() === this.text && this.host.archive.get(this.path)?.baseline === this.base;
+    const renderHistory = () => {
+      status.textContent = loading ? "Loading earlier revisions\u2026" : history.position === 0 ? "Current text" : `${history.selected.label ? `${history.selected.label} \xB7 ` : ""}${new Date(history.selected.time).toLocaleString()}`;
+      version.hidden = history.position === 0;
+      version.textContent = history.selected.text || "(Area not present in this revision)";
+      previous.disabled = loading || !history.hasOlder;
+      next.disabled = loading || !history.hasNewer;
+      restore.hidden = history.position === 0;
+      restore.disabled = loading || history.selected.text === history.entries[0].text;
+      note.textContent = !history.hasOlder ? history.stopReason : "";
+      note.hidden = !note.textContent;
+      view.requestMeasure();
+    };
+    const browse = async (older) => {
+      if (loading) return;
+      if (!current()) {
         view.dispatch({});
         return;
       }
-      const areas = reviewAreas(this.base, this.text), target = areas[this.index + direction];
-      if (!target) return;
-      view.dispatch({ selection: { anchor: target.from }, effects: [this.reveal.of(this.index + direction), import_view.EditorView.scrollIntoView(Math.min(target.anchor, view.state.doc.length), { y: "center" })] });
-      view.focus();
+      loading = true;
+      renderHistory();
+      try {
+        if (older) await history.older(() => card.isConnected && current());
+        else history.newer();
+      } catch (error) {
+        new import_obsidian.Notice(`Could not load this area's revisions: ${String(error)}`, 9e3);
+      } finally {
+        loading = false;
+        if (card.isConnected) renderHistory();
+      }
     };
-    addButton("\u2190 Previous", "previous", () => navigate(-1), this.index === 0);
-    addButton("Next \u2192", "next", () => navigate(1), this.index === this.total - 1);
+    const useRevision = async () => {
+      if (loading || history.position === 0) return;
+      if (!current()) {
+        view.dispatch({});
+        return;
+      }
+      const enabled = Array.from(card.querySelectorAll("button")).filter((b) => !b.disabled);
+      enabled.forEach((b) => b.disabled = true);
+      card.setAttribute("aria-busy", "true");
+      try {
+        await this.host.restoreAreaVersion(this.path, this.text, this.base, history.currentRange, history.selected.text);
+        view.dispatch({});
+      } catch (error) {
+        new import_obsidian.Notice(String(error), 9e3);
+      } finally {
+        card.removeAttribute("aria-busy");
+        enabled.forEach((b) => b.disabled = false);
+      }
+    };
+    const previous = addButton("\u2190 Previous revision", "previous", () => browse(true), false, historyControls);
+    const next = addButton("Next revision \u2192", "next", () => browse(false), true, historyControls);
+    const restore = addButton("Use this revision", "restore-area", () => useRevision(), true, historyControls);
+    renderHistory();
     return wrapper;
   }
   // Keep buttons keyboard-accessible while preventing editor selection on clicks.
@@ -819,7 +1003,7 @@ function reviewExtension(host) {
       }
       if (hovered !== null) {
         const area = areas[hovered];
-        ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length, reveal), block: true, side: 1 }).range(state.doc.lineAt(area.anchor).to));
+        ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length), block: true, side: 1 }).range(state.doc.lineAt(area.anchor).to));
       }
     }
     return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, hovered, areas, raw };
@@ -1146,6 +1330,14 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     this.pending.delete(notePath);
     await this.capture(notePath, next, kind);
   }
+  async restoreAreaVersion(notePath, expected, base, range, text) {
+    if (this.current(notePath) !== expected || this.archive.get(notePath)?.baseline !== base) throw Error("The note changed while browsing revisions. Open its updated review box.");
+    if (range.from < 0 || range.to < range.from || range.to > expected.length) throw Error("Invalid area boundary.");
+    const next = expected.slice(0, range.from) + text + expected.slice(range.to);
+    await this.replaceSafely(notePath, expected, next, "restore-area");
+    this.refreshEditors();
+    this.refreshViews();
+  }
   async recoverCopy(revision) {
     const basename = revision.path.split("/").pop()?.replace(/\.md$/i, "") || "Recovered note";
     const name = `${basename} (recovered ${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}).md`;
@@ -1396,7 +1588,7 @@ var TrackSettings = class extends import_obsidian2.PluginSettingTab {
     root.empty();
     root.createEl("h2", { text: "Track Changes" });
     root.createEl("p", { text: "History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version." });
-    new import_obsidian2.Setting(root).setName("Inline highlights and review boxes").setDesc("Show word highlights and an Accept / Reject / Previous / Next box beneath each changed paragraph.").addToggle((t) => t.setValue(p.settings.highlights).onChange(async (value) => {
+    new import_obsidian2.Setting(root).setName("Inline highlights and review boxes").setDesc("Show word highlights, Accept / Reject controls, and Previous / Next revisions of the hovered area.").addToggle((t) => t.setValue(p.settings.highlights).onChange(async (value) => {
       p.settings.highlights = value;
       await p.saveData(p.settings);
       p.refreshEditors();

@@ -1,11 +1,12 @@
 # Track Changes for Obsidian
 
-Review edits without losing the text you replace. Additions appear underlined and deletions appear struck through. Hover over changed text to reveal its compact review box beneath the paragraph. Accept or reject that area's edits directly in the note, and use Previous / Next to jump between changed areas. The accepted version is separate from the revision archive: accepting an edit never removes its history.
+Review edits without losing the text you replace. Additions appear underlined and deletions appear struck through. Hover over changed text to reveal its compact review box beneath the paragraph. Accept or reject that area's edits directly in the note. Previous / Next revision browse older and newer saved text for that same area. The accepted version is separate from the revision archive: accepting an edit never removes its history.
 
 ## Features
 
 - Inline tracking in Markdown Source mode and Live Preview.
-- Hover over changed text to reveal its review box, with Accept, Reject, Previous change, and Next change controls. Only one box is shown, and hidden boxes leave no blank space.
+- Hover over changed text to reveal its review box, with Accept, Reject, Previous revision, and Next revision controls. Only one box is shown, and hidden boxes leave no blank space.
+- Preview the hovered area's historical text without changing the document or moving the cursor. Use this revision restores only that area and saves the preceding note first.
 - Whole-word highlights and short old/new previews, with edits in the same paragraph grouped into one review decision.
 - Review sidebar with Accept / Reject per change and Accept all / Reject all.
 - Automatic snapshots after 800 ms of inactivity, or at most 5 seconds during continuous typing; disk save events also capture changes.
@@ -30,7 +31,7 @@ For a manual installation, create `.obsidian/plugins/track-changes/` inside your
 
 1. Enable the plugin. It creates a first accepted version of each Markdown note as it scans the vault. It cannot reconstruct edits made before it was installed.
 2. Edit a note normally in Source mode or Live Preview. Hover over an underlined addition or struck-through deletion to open its review box. The box stays open while you move onto its buttons and closes shortly after you move away from both the text and the box. Moving the text cursor into a change does not open it.
-3. In the box, select **Accept** to keep that area's edits in the accepted version, or **Reject** to restore its earlier text. **Previous / Next** jump to the preceding or following changed area and reveal its controls. Nearby edits in the same paragraph share one box; other changed paragraphs remain pending.
+3. In the box, select **Accept** to keep that area's pending edits in the accepted version, or **Reject** to restore its accepted text. **Previous revision / Next revision** browse older and newer saved text for this same area; they neither jump to other areas nor edit the note. To apply the displayed older text, choose **Use this revision**. Nearby edits in the same paragraph share one box; other changed paragraphs remain pending.
 4. Use **Save a named checkpoint** before rewriting a section. Checkpoints remain in the revision list even if the text did not change.
 5. Open **Track Changes: Review tracked changes and history** from the command palette or the history ribbon icon for the complete revision browser and Accept all / Reject all. Select a revision to inspect its diff. **Recover as copy** creates a separate note; **Restore this version** saves the present text before replacing it.
 6. Select **Browse all notes** to find a deleted note and recover a copy.
@@ -50,6 +51,14 @@ Only `.md` notes are tracked. Attachments, canvases, and other file types are no
 This is a local single-vault review workflow, without collaborator attribution or a Google Docs collaboration server. Inline diffing is disabled above 150,000 combined characters to keep the editor responsive; full history still works. For combined versions above 400,000 characters, or if the diff times out, a reversible whole-note replacement is used. The sidebar shows up to 100 pending changes at a time and 30 history revisions per page; this does not limit stored history.
 
 Your existing Edit History plugin can remain installed and keeps its own independent archive. Track Changes does not import or alter its data.
+
+### Area revision browsing
+
+The popup follows the hovered paragraph, or contiguous changed area, backward through adjacent full-note snapshots. It adjusts boundaries when text before the area is inserted or deleted and skips consecutive snapshots where only other parts of the note changed. Older snapshots are read on demand; reopening the popup starts at the current text. A return to a formerly used value remains a separate revision.
+
+If an older rewrite crosses an area's non-whitespace boundaries, or repeated text makes the match ambiguous, browsing stops and explains why. It does not substitute a whole document or another paragraph. The complete snapshot is still available in the sidebar's full-note revision history. Browsing also stops at the point where an inserted area did not yet exist. Hovering a deletion follows the removed text at its insertion point rather than taking the surviving paragraph beside it.
+
+**Use this revision** changes only the area's current boundaries. The rest of the current note, including other pending edits, is preserved. The accepted baseline stays unchanged, so restoring historical text may itself remain a pending change to review.
 
 ## Development
 
