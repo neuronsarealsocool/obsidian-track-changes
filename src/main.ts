@@ -1,11 +1,12 @@
 import {App,FileSystemAdapter,ItemView,MarkdownView,Modal,Notice,Plugin,PluginSettingTab,Setting,TFile,WorkspaceLeaf,editorInfoField} from 'obsidian';
-import {Decoration,DecorationSet,EditorView,ViewPlugin,ViewUpdate,WidgetType} from '@codemirror/view';
-import {RangeSetBuilder} from '@codemirror/state';
+import {EditorView} from '@codemirror/view';
 import {diffWordsWithSpace} from 'diff';
 import path from 'node:path';
 import os from 'node:os';
 import {Archive,Revision} from './storage';
-import {acceptOne,Change,changes,rejectOne} from './changes';
+import {acceptOne,Change,rejectOne} from './changes';
+import {reviewExtension} from './inline-review';
+import {reviewAreas} from './review-areas';
 
 const VIEW='track-changes-review';
 // Obsidian does not await unload hooks. Share the final flush promise across
@@ -14,11 +15,6 @@ const handoffKey=Symbol.for('obsidian-track-changes.archive-handoffs');
 const handoffs:Map<string,Promise<unknown>>=(globalThis as any)[handoffKey]??=((new Map<string,Promise<unknown>>()));
 interface Settings {archiveDirectory:string;highlights:boolean;saveDelayMs:number}
 interface Pending {content:string;first:number;last:number}
-class DeletedText extends WidgetType {
-  constructor(readonly text:string){super();}
-  eq(other:DeletedText){return other.text===this.text;}
-  toDOM(){const span=document.createElement('span');span.className='tc-deletion';span.textContent=this.text;span.setAttribute('aria-label',`Deleted: ${this.text}`);return span;}
-}
 export default class TrackChanges extends Plugin {
   settings:Settings={archiveDirectory:path.join(os.homedir(),'Obsidian Track Changes History'),highlights:true,saveDelayMs:800};
   archive!:Archive; ready=false; pending=new Map<string,Pending>();lastError='';private lastNotice=0;private stopped=false;
@@ -98,35 +94,7 @@ export default class TrackChanges extends Plugin {
   // Allows the isolated integration harness to use Obsidian's own CM state field.
   get editorContextField(){return editorInfoField;}
   extension(){
-    const plugin=this;
-    return ViewPlugin.fromClass(class {
-      decorations:DecorationSet=Decoration.none;
-      private lastBaseline?:string;private lastText?:string;private lastHighlights?:boolean;
-      constructor(readonly view:EditorView){this.build();}
-      update(update:ViewUpdate){
-        const file=update.state.field(editorInfoField,false)?.file;
-        if(update.docChanged&&file){
-          if(!plugin.archive.get(file.path))void plugin.capture(file.path,update.startState.doc.toString()).catch(()=>{});
-          plugin.schedule(file.path,update.state.doc.toString());
-        }
-        this.build();
-      }
-      build(){
-        const notePath=this.view.state.field(editorInfoField,false)?.file?.path,baseline=notePath?plugin.archive.get(notePath)?.baseline:undefined;
-        const current=this.view.state.doc.toString();
-        if(this.lastBaseline===baseline&&this.lastText===current&&this.lastHighlights===plugin.settings.highlights)return;
-        this.lastBaseline=baseline;this.lastText=current;this.lastHighlights=plugin.settings.highlights;
-        if(!plugin.settings.highlights||baseline===undefined){this.decorations=Decoration.none;return;}
-        // Inline diffing is bounded; full history and review remain available for large notes.
-        if(current.length+baseline.length>150000){this.decorations=Decoration.none;return;}
-        const builder=new RangeSetBuilder<Decoration>();
-        for(const c of changes(baseline,current)){
-          if(c.removed)builder.add(c.from,c.from,Decoration.widget({widget:new DeletedText(c.removed),side:-1}));
-          if(c.to>c.from)builder.add(c.from,c.to,Decoration.mark({class:'tc-addition'}));
-        }
-        this.decorations=builder.finish();
-      }
-    },{decorations:v=>v.decorations});
+    return reviewExtension(this);
   }
   async applyChange(notePath:string,expected:string,base:string,change:Change|undefined,accept:boolean){
     if(this.current(notePath)!==expected||this.archive.get(notePath)?.baseline!==base)throw Error('The note changed while reviewing. Refresh and try again.');
@@ -186,7 +154,7 @@ class ReviewView extends ItemView {
     if(!doc){root.createEl('p',{text:'Open a Markdown note, or browse all notes to recover a deleted document.'});return;}
     root.createEl('h3',{text:doc.path+(doc.deleted?' (deleted)':'')});
     if(!doc.deleted){
-      const current=p.current(doc.path),base=doc.baseline,edits=changes(base,current);
+      const current=p.current(doc.path),base=doc.baseline,edits=reviewAreas(base,current);
       root.createEl('p',{text:`${edits.length} pending change${edits.length===1?'':'s'} since the last accepted version.`});
       const actions=root.createDiv({cls:'tc-tools'});
       button(actions,'Accept all',async()=>{await p.applyChange(doc.path,current,base,undefined,true);await this.render();},true);
@@ -248,7 +216,7 @@ class TrackSettings extends PluginSettingTab {
   constructor(app:App,readonly plugin:TrackChanges){super(app,plugin);}
   display(){const root=this.containerEl,p=this.plugin;root.empty();root.createEl('h2',{text:'Track Changes'});
     root.createEl('p',{text:'History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version.'});
-    new Setting(root).setName('Inline highlights').setDesc('Show inserted text and struck-through deleted text in the editor.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{p.settings.highlights=value;await p.saveData(p.settings);p.refreshEditors();}));
+    new Setting(root).setName('Inline highlights and review boxes').setDesc('Show word highlights and an Accept / Reject / Previous / Next box beneath each changed paragraph.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{p.settings.highlights=value;await p.saveData(p.settings);p.refreshEditors();}));
     let directory=p.settings.archiveDirectory;
     new Setting(root).setName('Archive directory').setDesc('Absolute folder outside the vault. A separate subfolder is used for each vault. Changing it requires a plugin reload; move the existing vault history folder yourself to keep continuity.').addText(t=>t.setValue(directory).onChange(value=>{directory=value.trim();})).addButton(b=>b.setButtonText('Save for next reload').onClick(async()=>{if(!path.isAbsolute(directory)){new Notice('Choose an absolute folder path.');return;}p.settings.archiveDirectory=directory;await p.saveData(p.settings);new Notice('Saved. Reload the plugin to use this directory. Existing history has not been moved.');}));
     root.createEl('p',{text:`Active archive: ${p.archive?.root??'Not initialized'}`,cls:'tc-archive-path'});

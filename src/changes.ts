@@ -1,9 +1,9 @@
-import {diffChars} from 'diff';
+import {diffChars,diffWordsWithSpace} from 'diff';
 export interface Change {from:number; to:number; oldFrom:number; oldTo:number; removed:string; added:string}
-export function changes(base:string, current:string):Change[] {
+export function changes(base:string, current:string,wholeWords=false):Change[] {
   let oldPos=0, pos=0; const out:Change[]=[]; let pending:Change|undefined;
   // Bound diff work for very large notes; a whole-note change is still reversible.
-  const parts = base.length+current.length>400000 ? null : diffChars(base,current,{timeout:150});
+  const parts = base.length+current.length>400000 ? null : (wholeWords?diffWordsWithSpace:diffChars)(base,current,{timeout:150});
   if (!parts) return base===current ? [] : [{from:0,to:current.length,oldFrom:0,oldTo:base.length,removed:base,added:current}];
   for (const part of parts) {
     if (!part.added && !part.removed) {if(pending){out.push(pending);pending=undefined;} pos+=part.value.length;oldPos+=part.value.length;continue;}

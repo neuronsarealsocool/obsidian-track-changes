@@ -34,9 +34,7 @@ __export(main_exports, {
   default: () => TrackChanges
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian = require("obsidian");
-var import_view = require("@codemirror/view");
-var import_state = require("@codemirror/state");
+var import_obsidian2 = require("obsidian");
 
 // node_modules/diff/libesm/diff/base.js
 var Diff = class {
@@ -606,11 +604,11 @@ var Archive = class {
 };
 
 // src/changes.ts
-function changes(base, current) {
+function changes(base, current, wholeWords = false) {
   let oldPos = 0, pos = 0;
   const out = [];
   let pending;
-  const parts = base.length + current.length > 4e5 ? null : diffChars(base, current, { timeout: 150 });
+  const parts = base.length + current.length > 4e5 ? null : (wholeWords ? diffWordsWithSpace : diffChars)(base, current, { timeout: 150 });
   if (!parts) return base === current ? [] : [{ from: 0, to: current.length, oldFrom: 0, oldTo: base.length, removed: base, added: current }];
   for (const part of parts) {
     if (!part.added && !part.removed) {
@@ -644,10 +642,30 @@ function rejectOne(current, change) {
   return current.slice(0, change.from) + change.removed + current.slice(change.to);
 }
 
-// src/main.ts
-var VIEW = "track-changes-review";
-var handoffKey = Symbol.for("obsidian-track-changes.archive-handoffs");
-var handoffs = globalThis[handoffKey] ??= /* @__PURE__ */ new Map();
+// src/inline-review.ts
+var import_obsidian = require("obsidian");
+var import_state = require("@codemirror/state");
+var import_view = require("@codemirror/view");
+
+// src/review-areas.ts
+function reviewAreas(base, current, edits = changes(base, current, true)) {
+  const areas = [];
+  for (const change of edits) {
+    const previous = areas.at(-1);
+    const boundary = current.slice(change.to).search(/\r?\n[\t ]*\r?\n/);
+    const anchor = boundary < 0 ? current.length : change.to + boundary;
+    if (previous && change.from <= previous.anchor) {
+      previous.to = change.to;
+      previous.oldTo = change.oldTo;
+      previous.added = current.slice(previous.from, previous.to);
+      previous.removed = base.slice(previous.oldFrom, previous.oldTo);
+      previous.anchor = Math.max(previous.anchor, anchor);
+    } else areas.push({ ...change, anchor });
+  }
+  return areas;
+}
+
+// src/inline-review.ts
 var DeletedText = class extends import_view.WidgetType {
   constructor(text) {
     super();
@@ -664,7 +682,158 @@ var DeletedText = class extends import_view.WidgetType {
     return span;
   }
 };
-var TrackChanges = class extends import_obsidian.Plugin {
+function preview(text) {
+  const value = text.replace(/\r?\n/g, " \u21B5 ");
+  return value.trim() ? value.length > 130 ? `${value.slice(0, 130)}\u2026` : value : "Whitespace";
+}
+var ReviewBox = class extends import_view.WidgetType {
+  constructor(host, path3, base, text, area, index, total, active) {
+    super();
+    this.host = host;
+    this.path = path3;
+    this.base = base;
+    this.text = text;
+    this.area = area;
+    this.index = index;
+    this.total = total;
+    this.active = active;
+  }
+  eq(other) {
+    return this.host === other.host && this.path === other.path && this.base === other.base && this.text === other.text && this.index === other.index && this.total === other.total && this.active === other.active;
+  }
+  toDOM(view) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "tc-inline-container";
+    wrapper.contentEditable = "false";
+    const card = document.createElement("div");
+    card.className = `tc-inline-review${this.active ? " is-active" : ""}`;
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-label", `Review change ${this.index + 1} of ${this.total}`);
+    card.dataset.changeIndex = String(this.index);
+    card.dataset.from = String(this.area.from);
+    wrapper.appendChild(card);
+    const heading = document.createElement("div");
+    heading.className = "tc-inline-header";
+    card.appendChild(heading);
+    const title = document.createElement("span");
+    title.className = "tc-inline-title";
+    title.textContent = this.area.removed ? this.area.added ? "Changed text" : "Deleted text" : "Added text";
+    heading.appendChild(title);
+    const count = document.createElement("span");
+    count.className = "tc-inline-count";
+    count.textContent = `${this.index + 1} of ${this.total}`;
+    heading.appendChild(count);
+    const summary = document.createElement("div");
+    summary.className = "tc-inline-preview";
+    card.appendChild(summary);
+    if (this.area.removed) {
+      const old = document.createElement("del");
+      old.textContent = preview(this.area.removed);
+      old.setAttribute("aria-label", `Previous text: ${this.area.removed}`);
+      summary.appendChild(old);
+    }
+    if (this.area.added) {
+      const added = document.createElement("ins");
+      added.textContent = preview(this.area.added);
+      added.setAttribute("aria-label", `New text: ${this.area.added}`);
+      summary.appendChild(added);
+    }
+    const controls = document.createElement("div");
+    controls.className = "tc-inline-controls";
+    card.appendChild(controls);
+    const addButton = (label, action, run, disabled = false) => {
+      const button2 = document.createElement("button");
+      button2.type = "button";
+      button2.textContent = label;
+      button2.dataset.action = action;
+      button2.disabled = disabled;
+      button2.setAttribute("aria-label", action === "previous" ? "Previous change" : action === "next" ? "Next change" : `${label} this changed area`);
+      button2.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void run();
+      });
+      controls.appendChild(button2);
+      return button2;
+    };
+    const decide = async (accept) => {
+      if (card.getAttribute("aria-busy") === "true") return;
+      const enabled = Array.from(card.querySelectorAll("button")).filter((b) => !b.disabled);
+      enabled.forEach((b) => b.disabled = true);
+      card.setAttribute("aria-busy", "true");
+      try {
+        if (view.state.doc.toString() !== this.text) throw Error("The note changed while reviewing. Use its updated review box.");
+        await this.host.applyChange(this.path, this.text, this.base, this.area, accept);
+        view.dispatch({});
+      } catch (error) {
+        new import_obsidian.Notice(String(error), 9e3);
+      } finally {
+        card.removeAttribute("aria-busy");
+        enabled.forEach((b) => b.disabled = false);
+      }
+    };
+    addButton("Accept", "accept", () => decide(true)).classList.add("tc-inline-accept");
+    addButton("Reject", "reject", () => decide(false));
+    const navigate = (direction) => {
+      if (view.state.doc.toString() !== this.text || this.host.archive.get(this.path)?.baseline !== this.base) {
+        view.dispatch({});
+        return;
+      }
+      const areas = reviewAreas(this.base, this.text), target = areas[this.index + direction];
+      if (!target) return;
+      view.dispatch({ selection: { anchor: target.from }, effects: import_view.EditorView.scrollIntoView(Math.min(target.anchor, view.state.doc.length), { y: "center" }) });
+      view.focus();
+    };
+    addButton("\u2190 Previous", "previous", () => navigate(-1), this.index === 0);
+    addButton("Next \u2192", "next", () => navigate(1), this.index === this.total - 1);
+    return wrapper;
+  }
+  // Keep buttons keyboard-accessible while preventing editor selection on clicks.
+  ignoreEvent() {
+    return true;
+  }
+  get estimatedHeight() {
+    return 132;
+  }
+};
+function reviewExtension(host) {
+  function build(state, previous) {
+    const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, base = path3 ? host.archive.get(path3)?.baseline : void 0;
+    const text = state.doc.toString(), enabled = host.settings.highlights;
+    const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled;
+    const raw = unchanged ? previous.raw : enabled && base !== void 0 && text.length + base.length <= 15e4 ? changes(base, text, true) : [];
+    const areas = unchanged ? previous.areas : base !== void 0 ? reviewAreas(base, text, raw) : [];
+    const cursor = state.selection.main.head, active = areas.findIndex((a) => cursor >= a.from && cursor <= a.anchor);
+    if (unchanged && previous.active === active) return previous;
+    const ranges = [];
+    if (path3 && base !== void 0 && areas.length) {
+      for (const c of raw) {
+        if (c.removed) ranges.push(import_view.Decoration.widget({ widget: new DeletedText(c.removed), side: -1 }).range(c.from));
+        if (c.to > c.from) ranges.push(import_view.Decoration.mark({ class: "tc-addition" }).range(c.from, c.to));
+      }
+      for (const [index, area] of areas.entries()) ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, index, areas.length, index === active), block: true, side: 1 }).range(state.doc.lineAt(area.anchor).to));
+    }
+    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, active, areas, raw };
+  }
+  const field = import_state.StateField.define({ create: (state) => build(state), update: (value, tr) => build(tr.state, value), provide: (f) => import_view.EditorView.decorations.from(f, (value) => value.decorations) });
+  const capture = import_view.ViewPlugin.fromClass(class {
+    update(update) {
+      const file = update.state.field(import_obsidian.editorInfoField, false)?.file;
+      if (update.docChanged && file) {
+        if (!host.archive.get(file.path)) void host.capture(file.path, update.startState.doc.toString()).catch(() => {
+        });
+        host.schedule(file.path, update.state.doc.toString());
+      }
+    }
+  });
+  return [field, capture];
+}
+
+// src/main.ts
+var VIEW = "track-changes-review";
+var handoffKey = Symbol.for("obsidian-track-changes.archive-handoffs");
+var handoffs = globalThis[handoffKey] ??= /* @__PURE__ */ new Map();
+var TrackChanges = class extends import_obsidian2.Plugin {
   settings = { archiveDirectory: import_node_path2.default.join(import_node_os.default.homedir(), "Obsidian Track Changes History"), highlights: true, saveDelayMs: 800 };
   archive;
   ready = false;
@@ -677,7 +846,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
   async onload() {
     this.settings = { ...this.settings, ...await this.loadData() };
     this.settings.saveDelayMs = Math.max(200, Math.min(5e3, Number(this.settings.saveDelayMs) || 800));
-    if (!(this.app.vault.adapter instanceof import_obsidian.FileSystemAdapter)) throw Error("Track Changes requires a desktop filesystem vault.");
+    if (!(this.app.vault.adapter instanceof import_obsidian2.FileSystemAdapter)) throw Error("Track Changes requires a desktop filesystem vault.");
     const vaultPath = this.app.vault.adapter.getBasePath();
     this.archive = new Archive(import_node_path2.default.join(this.settings.archiveDirectory, Archive.vaultId(vaultPath)));
     this.registerView(VIEW, (leaf) => new ReviewView(leaf, this));
@@ -691,7 +860,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
       this.settings.highlights = !this.settings.highlights;
       void this.saveData(this.settings);
       this.refreshEditors();
-      new import_obsidian.Notice(`Track Changes highlights ${this.settings.highlights ? "on" : "off"}`);
+      new import_obsidian2.Notice(`Track Changes highlights ${this.settings.highlights ? "on" : "off"}`);
     } });
     const status = this.addStatusBarItem();
     status.setText("Track Changes: loading");
@@ -720,17 +889,17 @@ var TrackChanges = class extends import_obsidian.Plugin {
       return;
     }
     this.registerEvent(this.app.vault.on("modify", (file) => {
-      if (file instanceof import_obsidian.TFile && file.extension === "md") void this.captureDisk(file);
+      if (file instanceof import_obsidian2.TFile && file.extension === "md") void this.captureDisk(file);
     }));
     this.registerEvent(this.app.vault.on("create", (file) => {
-      if (file instanceof import_obsidian.TFile && file.extension === "md") void this.captureDisk(file);
+      if (file instanceof import_obsidian2.TFile && file.extension === "md") void this.captureDisk(file);
     }));
     this.registerEvent(this.app.workspace.on("file-open", (file) => {
       if (file?.extension === "md") void this.captureDisk(file);
       this.refreshViews();
     }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
-      if (file instanceof import_obsidian.TFile) {
+      if (file instanceof import_obsidian2.TFile) {
         if (file.extension === "md") void this.rename(file, oldPath);
       } else for (const r of [...this.archive.docs.values()]) if (!r.deleted && r.path.startsWith(`${oldPath}/`)) void this.renamePath(r.path, `${file.path}${r.path.slice(oldPath.length)}`);
     }));
@@ -755,7 +924,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
     console.error("Track Changes", error);
     this.lastError = String(error);
     if (Date.now() - this.lastNotice > 1e4) {
-      new import_obsidian.Notice(`Track Changes could not save history: ${String(error)}. Existing history was preserved.`, 12e3);
+      new import_obsidian2.Notice(`Track Changes could not save history: ${String(error)}. Existing history was preserved.`, 12e3);
       this.lastNotice = Date.now();
     }
   }
@@ -877,51 +1046,10 @@ var TrackChanges = class extends import_obsidian.Plugin {
   }
   // Allows the isolated integration harness to use Obsidian's own CM state field.
   get editorContextField() {
-    return import_obsidian.editorInfoField;
+    return import_obsidian2.editorInfoField;
   }
   extension() {
-    const plugin = this;
-    return import_view.ViewPlugin.fromClass(class {
-      constructor(view) {
-        this.view = view;
-        this.build();
-      }
-      decorations = import_view.Decoration.none;
-      lastBaseline;
-      lastText;
-      lastHighlights;
-      update(update) {
-        const file = update.state.field(import_obsidian.editorInfoField, false)?.file;
-        if (update.docChanged && file) {
-          if (!plugin.archive.get(file.path)) void plugin.capture(file.path, update.startState.doc.toString()).catch(() => {
-          });
-          plugin.schedule(file.path, update.state.doc.toString());
-        }
-        this.build();
-      }
-      build() {
-        const notePath = this.view.state.field(import_obsidian.editorInfoField, false)?.file?.path, baseline = notePath ? plugin.archive.get(notePath)?.baseline : void 0;
-        const current = this.view.state.doc.toString();
-        if (this.lastBaseline === baseline && this.lastText === current && this.lastHighlights === plugin.settings.highlights) return;
-        this.lastBaseline = baseline;
-        this.lastText = current;
-        this.lastHighlights = plugin.settings.highlights;
-        if (!plugin.settings.highlights || baseline === void 0) {
-          this.decorations = import_view.Decoration.none;
-          return;
-        }
-        if (current.length + baseline.length > 15e4) {
-          this.decorations = import_view.Decoration.none;
-          return;
-        }
-        const builder = new import_state.RangeSetBuilder();
-        for (const c of changes(baseline, current)) {
-          if (c.removed) builder.add(c.from, c.from, import_view.Decoration.widget({ widget: new DeletedText(c.removed), side: -1 }));
-          if (c.to > c.from) builder.add(c.from, c.to, import_view.Decoration.mark({ class: "tc-addition" }));
-        }
-        this.decorations = builder.finish();
-      }
-    }, { decorations: (v) => v.decorations });
+    return reviewExtension(this);
   }
   async applyChange(notePath, expected, base, change, accept) {
     if (this.current(notePath) !== expected || this.archive.get(notePath)?.baseline !== base) throw Error("The note changed while reviewing. Refresh and try again.");
@@ -944,7 +1072,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
       editor.setValue(next);
     } else {
       const file = this.app.vault.getAbstractFileByPath(notePath);
-      if (!(file instanceof import_obsidian.TFile)) throw Error("Note no longer exists. Use Recover as copy.");
+      if (!(file instanceof import_obsidian2.TFile)) throw Error("Note no longer exists. Use Recover as copy.");
       await this.app.vault.process(file, (current) => {
         if (current !== expected) throw Error("The note changed. Nothing was replaced.");
         return next;
@@ -959,7 +1087,7 @@ var TrackChanges = class extends import_obsidian.Plugin {
     const file = await this.app.vault.create(name, revision.content);
     await this.capture(file.path, revision.content, "recovered-copy");
     await this.app.workspace.getLeaf(false).openFile(file);
-    new import_obsidian.Notice("Recovered as a new note. Original note preserved.");
+    new import_obsidian2.Notice("Recovered as a new note. Original note preserved.");
   }
   onunload() {
     this.stopped = true;
@@ -974,7 +1102,7 @@ function button(parent, text, action, primary = false) {
   const b = parent.createEl("button", { text, cls: primary ? "mod-cta" : "" });
   b.addEventListener("click", () => {
     b.disabled = true;
-    Promise.resolve().then(action).catch((e) => new import_obsidian.Notice(String(e), 9e3)).finally(() => b.disabled = false);
+    Promise.resolve().then(action).catch((e) => new import_obsidian2.Notice(String(e), 9e3)).finally(() => b.disabled = false);
   });
   return b;
 }
@@ -988,7 +1116,7 @@ function showDiff(parent, before, after) {
   }
   for (const part of parts) el.createEl(part.added ? "ins" : part.removed ? "del" : "span", { text: part.value });
 }
-var ReviewView = class extends import_obsidian.ItemView {
+var ReviewView = class extends import_obsidian2.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -1065,7 +1193,7 @@ var ReviewView = class extends import_obsidian.ItemView {
     }
     root.createEl("h3", { text: doc.path + (doc.deleted ? " (deleted)" : "") });
     if (!doc.deleted) {
-      const current = p.current(doc.path), base = doc.baseline, edits = changes(base, current);
+      const current = p.current(doc.path), base = doc.baseline, edits = reviewAreas(base, current);
       root.createEl("p", { text: `${edits.length} pending change${edits.length === 1 ? "" : "s"} since the last accepted version.` });
       const actions = root.createDiv({ cls: "tc-tools" });
       button(actions, "Accept all", async () => {
@@ -1108,17 +1236,17 @@ var ReviewView = class extends import_obsidian.ItemView {
       this.page++;
       void this.render();
     }).disabled = (this.page + 1) * 30 >= names.length;
-    const history = root.createDiv({ cls: "tc-history" }), preview = root.createDiv();
+    const history = root.createDiv({ cls: "tc-history" }), preview2 = root.createDiv();
     const entries = await Promise.all(names.slice(this.page * 30, this.page * 30 + 30).map(async (name) => ({ name, r: await p.archive.load(doc.docId, name) })));
     if (gen !== this.generation || this.disposed) return;
     for (const { name, r } of entries) {
       button(history, `${new Date(r.time).toLocaleString()} \xB7 ${r.label || r.kind}`, async () => {
         this.selectedRevision = r;
         this.selectionName = name;
-        await this.preview(preview, r, name, names);
+        await this.preview(preview2, r, name, names);
       });
     }
-    if (this.selectedRevision?.docId === doc.docId && this.selectionName) await this.preview(preview, this.selectedRevision, this.selectionName, names);
+    if (this.selectedRevision?.docId === doc.docId && this.selectionName) await this.preview(preview2, this.selectedRevision, this.selectionName, names);
   }
   renderNoteList(list) {
     list.empty();
@@ -1152,7 +1280,7 @@ var ReviewView = class extends import_obsidian.ItemView {
     showDiff(root, previous?.content ?? "", r.content);
   }
 };
-var NameModal = class extends import_obsidian.Modal {
+var NameModal = class extends import_obsidian2.Modal {
   constructor(app, title, done) {
     super(app);
     this.title = title;
@@ -1165,14 +1293,14 @@ var NameModal = class extends import_obsidian.Modal {
     button(this.contentEl, "Save checkpoint", async () => {
       await this.done(input.value.trim() || "Checkpoint");
       this.close();
-      new import_obsidian.Notice("Checkpoint saved");
+      new import_obsidian2.Notice("Checkpoint saved");
     }, true);
   }
   onClose() {
     this.contentEl.empty();
   }
 };
-var ConfirmModal = class extends import_obsidian.Modal {
+var ConfirmModal = class extends import_obsidian2.Modal {
   constructor(app, title, description, done) {
     super(app);
     this.title = title;
@@ -1193,7 +1321,7 @@ var ConfirmModal = class extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 };
-var TrackSettings = class extends import_obsidian.PluginSettingTab {
+var TrackSettings = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1203,22 +1331,22 @@ var TrackSettings = class extends import_obsidian.PluginSettingTab {
     root.empty();
     root.createEl("h2", { text: "Track Changes" });
     root.createEl("p", { text: "History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version." });
-    new import_obsidian.Setting(root).setName("Inline highlights").setDesc("Show inserted text and struck-through deleted text in the editor.").addToggle((t) => t.setValue(p.settings.highlights).onChange(async (value) => {
+    new import_obsidian2.Setting(root).setName("Inline highlights and review boxes").setDesc("Show word highlights and an Accept / Reject / Previous / Next box beneath each changed paragraph.").addToggle((t) => t.setValue(p.settings.highlights).onChange(async (value) => {
       p.settings.highlights = value;
       await p.saveData(p.settings);
       p.refreshEditors();
     }));
     let directory = p.settings.archiveDirectory;
-    new import_obsidian.Setting(root).setName("Archive directory").setDesc("Absolute folder outside the vault. A separate subfolder is used for each vault. Changing it requires a plugin reload; move the existing vault history folder yourself to keep continuity.").addText((t) => t.setValue(directory).onChange((value) => {
+    new import_obsidian2.Setting(root).setName("Archive directory").setDesc("Absolute folder outside the vault. A separate subfolder is used for each vault. Changing it requires a plugin reload; move the existing vault history folder yourself to keep continuity.").addText((t) => t.setValue(directory).onChange((value) => {
       directory = value.trim();
     })).addButton((b) => b.setButtonText("Save for next reload").onClick(async () => {
       if (!import_node_path2.default.isAbsolute(directory)) {
-        new import_obsidian.Notice("Choose an absolute folder path.");
+        new import_obsidian2.Notice("Choose an absolute folder path.");
         return;
       }
       p.settings.archiveDirectory = directory;
       await p.saveData(p.settings);
-      new import_obsidian.Notice("Saved. Reload the plugin to use this directory. Existing history has not been moved.");
+      new import_obsidian2.Notice("Saved. Reload the plugin to use this directory. Existing history has not been moved.");
     }));
     root.createEl("p", { text: `Active archive: ${p.archive?.root ?? "Not initialized"}`, cls: "tc-archive-path" });
     root.createEl("p", { text: "Accepting changes updates the accepted version; it never deletes revisions. Rejecting and restoring save the current text first. Deleted notes remain in Browse all notes. Highlights describe edits since the accepted version, not collaborator suggestions or author attribution." });

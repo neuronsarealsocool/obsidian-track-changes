@@ -1,10 +1,12 @@
 # Track Changes for Obsidian
 
-Review edits without losing the text you replace. Additions appear underlined, deletions appear struck through, and the sidebar lets you accept or reject individual changes or all changes. The accepted version is separate from the revision archive: accepting an edit never removes its history.
+Review edits without losing the text you replace. Additions appear underlined, deletions appear struck through, and a compact review box sits beneath each changed paragraph. Accept or reject that area's edits directly in the note, and use Previous / Next to jump between changed areas. The accepted version is separate from the revision archive: accepting an edit never removes its history.
 
 ## Features
 
 - Inline tracking in Markdown Source mode and Live Preview.
+- A review box beneath each changed paragraph, with Accept, Reject, Previous change, and Next change controls.
+- Whole-word highlights and short old/new previews, with edits in the same paragraph grouped into one review decision.
 - Review sidebar with Accept / Reject per change and Accept all / Reject all.
 - Automatic snapshots after 800 ms of inactivity, or at most 5 seconds during continuous typing; disk save events also capture changes.
 - Named checkpoints before a significant rewrite.
@@ -20,20 +22,20 @@ Review edits without losing the text you replace. Additions appear underlined, d
 
 Desktop Obsidian 1.5 or later is required.
 
-With [BRAT](https://github.com/TfTHacker/obsidian42-brat), add `neuronsarealsocool/obsidian-track-changes` as a beta plugin. GitHub releases include `main.js`, `manifest.json`, and `styles.css` as direct assets. If the repository is private, use an authenticated manual download; public BRAT access may require making the repository public.
+With [BRAT](https://github.com/TfTHacker/obsidian42-brat), add `neuronsarealsocool/obsidian-track-changes` as a beta plugin. The repository is public. GitHub releases include `main.js`, `manifest.json`, and `styles.css` as direct assets.
 
 For a manual installation, create `.obsidian/plugins/track-changes/` inside your vault, copy those three release files into it, and enable **Track Changes** in Community plugins. The AI-ready release zip also includes source, tests, build files, and compiled plugin files in one top-level folder.
 
 ## Use
 
 1. Enable the plugin. It creates a first accepted version of each Markdown note as it scans the vault. It cannot reconstruct edits made before it was installed.
-2. Open **Track Changes: Review tracked changes and history** from the command palette, or select the history ribbon icon.
-3. Edit a note normally. The sidebar groups differences from its last accepted version. Select Accept to keep a change in that accepted version; Reject puts the earlier text back.
+2. Edit a note normally in Source mode or Live Preview. A review box appears beneath each paragraph that differs from the last accepted version.
+3. In the box, select **Accept** to keep that area's edits in the accepted version, or **Reject** to restore its earlier text. **Previous / Next** jump to the preceding or following changed area. Nearby edits in the same paragraph share one box; other changed paragraphs remain pending.
 4. Use **Save a named checkpoint** before rewriting a section. Checkpoints remain in the revision list even if the text did not change.
-5. Select a revision to inspect its diff. **Recover as copy** creates a separate note; **Restore this version** saves the present text before replacing it.
+5. Open **Track Changes: Review tracked changes and history** from the command palette or the history ribbon icon for the complete revision browser and Accept all / Reject all. Select a revision to inspect its diff. **Recover as copy** creates a separate note; **Restore this version** saves the present text before replacing it.
 6. Select **Browse all notes** to find a deleted note and recover a copy.
 
-Tracked highlights are visual decorations: they are never inserted into your Markdown. Reading view and published notes show the actual document text.
+The review boxes and tracked highlights are editor decorations: they are never inserted into your Markdown or included in copies of its text. Reading view and published notes show the actual document text. Toggle **Inline highlights and review boxes** in settings to hide or show both.
 
 ## Storage and limits
 
