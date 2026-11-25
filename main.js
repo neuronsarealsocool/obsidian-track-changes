@@ -758,14 +758,45 @@ var AreaHistory = class {
   }
 };
 
+// src/archive-names.ts
+var documentId = /^[a-f0-9-]{36}$/;
+var legacyRevision = /^(\d+)-[a-f0-9-]+\.json\.gz$/;
+var datedRevision = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.(\d{3})_UTC([+-])(\d{2})(\d{2})\.json\.gz$/;
+function dateStamp(value) {
+  const date = new Date(value), pad = (n, width = 2) => String(n).padStart(width, "0"), offset = -date.getTimezoneOffset();
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}_UTC${offset < 0 ? "-" : "+"}${pad(Math.floor(Math.abs(offset) / 60))}${pad(Math.abs(offset) % 60)}`;
+}
+function safeName(value) {
+  return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/\s+/g, " ").trim().slice(0, 60).replace(/[. ]+$/, "") || "Untitled";
+}
+function revisionName(id) {
+  return `${dateStamp(Number(id.split("-")[0]))}.json.gz`;
+}
+function revisionTime(name) {
+  const old = name.match(legacyRevision);
+  if (old) return Number(old[1]);
+  const match = name.match(datedRevision);
+  if (!match) return;
+  const value = Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}${match[6]}${match[7]}:${match[8]}`);
+  return Number.isFinite(value) ? value : void 0;
+}
+function archiveDirectoryName(name) {
+  return documentId.test(name) || /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.\d{3}_UTC[+-]\d{4} - .+/.test(name);
+}
+function sortRevisions(names) {
+  return names.filter((name) => revisionTime(name) !== void 0).sort((a, b) => revisionTime(b) - revisionTime(a) || b.localeCompare(a));
+}
+
 // src/storage.ts
 var Archive = class _Archive {
-  constructor(root) {
+  constructor(root, vaultIdentity) {
     this.root = root;
+    this.vaultIdentity = vaultIdentity;
   }
   docs = /* @__PURE__ */ new Map();
   active = /* @__PURE__ */ new Map();
   queue = Promise.resolve();
+  folders = /* @__PURE__ */ new Map();
   static vaultId(vaultPath) {
     return (0, import_node_crypto.createHash)("sha256").update(import_node_path.default.resolve(vaultPath).replaceAll("\\", "/").toLowerCase()).digest("hex").slice(0, 24);
   }
@@ -776,14 +807,47 @@ var Archive = class _Archive {
     return task;
   }
   async init() {
+    if (this.vaultIdentity) {
+      try {
+        await import_node_fs.promises.access(this.root);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        const parent = import_node_path.default.dirname(this.root);
+        await import_node_fs.promises.mkdir(parent, { recursive: true });
+        const matches = [];
+        for (const entry of await import_node_fs.promises.readdir(parent, { withFileTypes: true })) if (entry.isDirectory()) {
+          try {
+            const metadata = JSON.parse(await import_node_fs.promises.readFile(import_node_path.default.join(parent, entry.name, ".vault.json"), "utf8"));
+            if (metadata.vaultId === this.vaultIdentity.id) matches.push(import_node_path.default.join(parent, entry.name));
+          } catch (error2) {
+            if (error2.code !== "ENOENT") throw error2;
+          }
+        }
+        if (matches.length > 1) throw Error("More than one archive matches this vault. Choose the intended history folder in settings.");
+        if (matches.length === 1) this.root = matches[0];
+      }
+    }
     await import_node_fs.promises.mkdir(this.root, { recursive: true });
+    if (this.vaultIdentity) {
+      try {
+        const metadata = JSON.parse(await import_node_fs.promises.readFile(import_node_path.default.join(this.root, ".vault.json"), "utf8"));
+        if (metadata.vaultId !== this.vaultIdentity.id) throw Error("This history folder belongs to a different vault.");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    this.docs.clear();
+    this.active.clear();
+    this.folders.clear();
     const errors = [];
     for (const entry of await import_node_fs.promises.readdir(this.root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^[a-f0-9-]{36}$/.test(entry.name)) continue;
-      const files = (await import_node_fs.promises.readdir(import_node_path.default.join(this.root, entry.name))).filter((n) => n.endsWith(".json.gz")).sort().reverse();
+      if (!entry.isDirectory() || !archiveDirectoryName(entry.name)) continue;
+      const files = sortRevisions(await import_node_fs.promises.readdir(import_node_path.default.join(this.root, entry.name)));
       for (const name of files) {
         try {
-          const r = await this.read(entry.name, name);
+          const r = await this.readAt(entry.name, name);
+          if (this.folders.has(r.docId)) throw Error("Duplicate document archive");
+          this.folders.set(r.docId, entry.name);
           this.docs.set(r.docId, r);
           break;
         } catch {
@@ -793,15 +857,20 @@ var Archive = class _Archive {
     }
     for (const r of [...this.docs.values()].sort((a, b) => a.id.localeCompare(b.id))) if (!r.deleted) this.active.set(r.path, r.docId);
     if (errors.length) throw new Error(`Unreadable archive revisions (${errors.length}); files preserved. First: ${errors[0]}`);
+    await this.readableLayout();
   }
   get(notePath) {
     const id = this.active.get(notePath);
     return id ? this.docs.get(id) : void 0;
   }
-  async read(docId, name) {
-    if (!/^[a-f0-9-]{36}$/.test(docId) || !/^\d+-[a-f0-9-]+\.json\.gz$/.test(name)) throw Error("Invalid revision path");
-    const r = JSON.parse((0, import_node_zlib.gunzipSync)(await import_node_fs.promises.readFile(import_node_path.default.join(this.root, docId, name))).toString("utf8"));
-    if (r.schema !== 1 || r.docId !== docId || typeof r.content !== "string" || typeof r.baseline !== "string" || typeof r.path !== "string" || !Array.isArray(r.aliases) || typeof r.deleted !== "boolean") throw Error("Invalid revision");
+  directory(docId) {
+    if (!documentId.test(docId)) throw Error("Invalid document");
+    return import_node_path.default.join(this.root, this.folders.get(docId) ?? docId);
+  }
+  async readAt(folder, name, docId) {
+    if (revisionTime(name) === void 0 || import_node_path.default.basename(folder) !== folder || !archiveDirectoryName(folder)) throw Error("Invalid revision path");
+    const r = JSON.parse((0, import_node_zlib.gunzipSync)(await import_node_fs.promises.readFile(import_node_path.default.join(this.root, folder, name))).toString("utf8"));
+    if (r.schema !== 1 || !documentId.test(r.docId) || docId && r.docId !== docId || typeof r.id !== "string" || Number(r.id.split("-")[0]) !== revisionTime(name) || typeof r.content !== "string" || typeof r.baseline !== "string" || typeof r.path !== "string" || !Array.isArray(r.aliases) || typeof r.deleted !== "boolean") throw Error("Invalid revision");
     const range = (value, limit = Number.MAX_SAFE_INTEGER) => value && Number.isSafeInteger(value.from) && Number.isSafeInteger(value.to) && value.from >= 0 && value.to >= value.from && value.to <= limit;
     if (r.areaAnchors !== void 0 && (!Array.isArray(r.areaAnchors) || r.areaAnchors.some((area) => !range(area, r.content.length) || typeof area.id !== "string" || typeof area.previousText !== "string"))) throw Error("Invalid area history markers");
     if (r.areaRestore !== void 0) {
@@ -812,11 +881,89 @@ var Archive = class _Archive {
     return r;
   }
   async list(docId) {
-    if (!/^[a-f0-9-]{36}$/.test(docId)) throw Error("Invalid document");
-    return (await import_node_fs.promises.readdir(import_node_path.default.join(this.root, docId))).filter((n) => /^\d+-[a-f0-9-]+\.json\.gz$/.test(n)).sort().reverse();
+    return sortRevisions(await import_node_fs.promises.readdir(this.directory(docId)));
   }
   async load(docId, name) {
-    return this.read(docId, name);
+    if (!documentId.test(docId)) throw Error("Invalid revision path");
+    return this.readAt(this.folders.get(docId) ?? docId, name, docId);
+  }
+  async availableFolder(base, current) {
+    let candidate = base, index = 2;
+    while (candidate !== current) {
+      try {
+        await import_node_fs.promises.access(import_node_path.default.join(this.root, candidate));
+        candidate = `${base} (${index++})`;
+      } catch (error) {
+        if (error.code === "ENOENT") break;
+        throw error;
+      }
+    }
+    return candidate;
+  }
+  async readableLayout() {
+    for (const [id, r] of this.docs) {
+      const names = await this.list(id), folder = this.folders.get(id);
+      for (const name of names) {
+        if (!/^\d+-[a-f0-9-]+\.json\.gz$/.test(name)) continue;
+        const revision = await this.readAt(folder, name, id), readable2 = revisionName(revision.id);
+        if (name === readable2) continue;
+        try {
+          await import_node_fs.promises.access(import_node_path.default.join(this.root, folder, readable2));
+          throw Error("A readable revision filename already exists. No history was overwritten.");
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        await import_node_fs.promises.rename(import_node_path.default.join(this.root, folder, name), import_node_path.default.join(this.root, folder, readable2));
+      }
+      const title = r.path.split("/").pop()?.replace(/\.md$/i, "") ?? "Untitled";
+      const readable = documentId.test(folder) ? await this.availableFolder(`${dateStamp(revisionTime(names.at(-1)))} - ${safeName(title)}`, folder) : folder;
+      if (readable !== folder) {
+        await import_node_fs.promises.rename(import_node_path.default.join(this.root, folder), import_node_path.default.join(this.root, readable));
+        this.folders.set(id, readable);
+      }
+    }
+    if (this.vaultIdentity) {
+      let created = (await import_node_fs.promises.stat(this.root)).birthtime.toISOString();
+      try {
+        const metadata2 = JSON.parse(await import_node_fs.promises.readFile(import_node_path.default.join(this.root, ".vault.json"), "utf8"));
+        if (metadata2.vaultId !== this.vaultIdentity.id) throw Error("This history folder belongs to a different vault.");
+        if (typeof metadata2.created !== "string" || !Number.isFinite(Date.parse(metadata2.created))) throw Error("Invalid vault archive creation date.");
+        created = metadata2.created;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      const metadata = import_node_path.default.join(this.root, ".vault.json");
+      try {
+        await import_node_fs.promises.access(metadata);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        const temporary = `${metadata}.${(0, import_node_crypto.randomUUID)()}.tmp`, handle = await import_node_fs.promises.open(temporary, "wx");
+        try {
+          await handle.writeFile(JSON.stringify({ schema: 1, vaultId: this.vaultIdentity.id, name: this.vaultIdentity.name, created }, null, 2));
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await import_node_fs.promises.rename(temporary, metadata);
+      }
+      const oldRoot = this.root;
+      if (archiveDirectoryName(import_node_path.default.basename(oldRoot)) && !documentId.test(import_node_path.default.basename(oldRoot))) return;
+      const parent = import_node_path.default.dirname(oldRoot), base = `${dateStamp(new Date(created))} - ${safeName(this.vaultIdentity.name)}`;
+      let target = import_node_path.default.join(parent, base), index = 2;
+      while (target !== oldRoot) {
+        try {
+          await import_node_fs.promises.access(target);
+          target = import_node_path.default.join(parent, `${base} (${index++})`);
+        } catch (error) {
+          if (error.code === "ENOENT") break;
+          throw error;
+        }
+      }
+      if (target !== oldRoot) {
+        await import_node_fs.promises.rename(oldRoot, target);
+        this.root = target;
+      }
+    }
   }
   save(notePath, content, kind = "edit", options = {}) {
     return this.serial(async () => {
@@ -840,9 +987,10 @@ var Archive = class _Archive {
         areaAnchors = [...(areaAnchors ?? []).filter((area) => area.id !== restored.id), { id: restored.id, ...restored.after, previousText: restored.previousText }];
       }
       const r = { schema: 1, id, docId, time: (/* @__PURE__ */ new Date()).toISOString(), path: notePath, aliases: [.../* @__PURE__ */ new Set([...old?.aliases ?? [], notePath])], kind, content, baseline, deleted: options.deleted ?? false, ...options.label ? { label: options.label } : {}, ...areaAnchors ? { areaAnchors } : {}, ...options.areaRestore ? { areaRestore: options.areaRestore } : {}, ...areaChanges.length ? { areaChanges } : {} };
-      const dir = import_node_path.default.join(this.root, docId);
+      const folder = this.folders.get(docId) ?? await this.availableFolder(`${dateStamp(Number(id.split("-")[0]))} - ${safeName(notePath.split("/").pop()?.replace(/\.md$/i, "") ?? "Untitled")}`);
+      const dir = import_node_path.default.join(this.root, folder);
       await import_node_fs.promises.mkdir(dir, { recursive: true });
-      const destination = import_node_path.default.join(dir, `${id}.json.gz`), tmp = `${destination}.tmp`;
+      const destination = import_node_path.default.join(dir, revisionName(id)), tmp = `${destination}.tmp`;
       const handle = await import_node_fs.promises.open(tmp, "wx");
       try {
         await handle.writeFile((0, import_node_zlib.gzipSync)(JSON.stringify(r)));
@@ -851,6 +999,7 @@ var Archive = class _Archive {
         await handle.close();
       }
       await import_node_fs.promises.rename(tmp, destination);
+      this.folders.set(docId, folder);
       if (old) this.active.delete(old.path);
       this.docs.set(docId, r);
       if (!r.deleted) this.active.set(notePath, docId);
@@ -879,11 +1028,28 @@ var Archive = class _Archive {
       if (nested(sourceReal, targetReal) || nested(targetReal, sourceReal)) throw Error("Choose a history folder outside the current vault archive.");
       const inventory = async (root) => {
         const files2 = [];
+        const preserved = async (relative) => {
+          for (const item of await import_node_fs.promises.readdir(import_node_path.default.join(root, relative), { withFileTypes: true })) {
+            const child = import_node_path.default.join(relative, item.name);
+            if (item.isDirectory()) await preserved(child);
+            else if (item.isFile()) files2.push(child);
+            else throw Error("A preserved archive contains a link. Existing files were preserved.");
+          }
+        };
         for (const doc of await import_node_fs.promises.readdir(root, { withFileTypes: true })) {
-          if (!doc.isDirectory() || !/^[a-f0-9-]{36}$/.test(doc.name)) throw Error(`Unexpected archive entry: ${doc.name}. Existing files were preserved.`);
+          if (doc.isFile() && doc.name.startsWith(".vault.json.") && doc.name.endsWith(".tmp")) continue;
+          if (doc.isFile() && doc.name === ".vault.json") {
+            files2.push(doc.name);
+            continue;
+          }
+          if (doc.isDirectory() && doc.name.startsWith("_preserved-")) {
+            await preserved(doc.name);
+            continue;
+          }
+          if (!doc.isDirectory() || !archiveDirectoryName(doc.name)) throw Error(`Unexpected archive entry: ${doc.name}. Existing files were preserved.`);
           for (const file of await import_node_fs.promises.readdir(import_node_path.default.join(root, doc.name), { withFileTypes: true })) {
             if (file.isFile() && file.name.endsWith(".tmp")) continue;
-            if (!file.isFile() || !/^\d+-[a-f0-9-]+\.json\.gz$/.test(file.name)) throw Error("Unexpected archive file. Existing files were preserved.");
+            if (!file.isFile() || revisionTime(file.name) === void 0) throw Error("Unexpected archive file. Existing files were preserved.");
             files2.push(import_node_path.default.join(doc.name, file.name));
           }
         }
@@ -1477,7 +1643,8 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     this.settings.saveDelayMs = Math.max(200, Math.min(5e3, Number(this.settings.saveDelayMs) || 800));
     if (!(this.app.vault.adapter instanceof import_obsidian2.FileSystemAdapter)) throw Error("Track Changes requires a desktop filesystem vault.");
     const vaultPath = this.app.vault.adapter.getBasePath();
-    this.archive = new Archive(import_node_path2.default.join(this.settings.archiveDirectory, Archive.vaultId(vaultPath)));
+    const folder = this.settings.archiveSubfolder;
+    this.archive = new Archive(import_node_path2.default.join(this.settings.archiveDirectory, folder && import_node_path2.default.basename(folder) === folder && ![".", ".."].includes(folder) ? folder : Archive.vaultId(vaultPath)), { id: Archive.vaultId(vaultPath), name: import_node_path2.default.basename(vaultPath) });
     this.registerView(VIEW, (leaf) => new ReviewView(leaf, this));
     this.addSettingTab(new TrackSettings(this.app, this));
     this.addRibbonIcon("history", "Track Changes: browse revision history", () => void this.openReview());
@@ -1510,6 +1677,7 @@ var TrackChanges = class extends import_obsidian2.Plugin {
       handoffs.delete(this.archive.root);
       await this.archive.init();
       if (this.stopped) return;
+      if (this.settings.archiveSubfolder !== import_node_path2.default.basename(this.archive.root)) await this.updateSettings({ archiveSubfolder: import_node_path2.default.basename(this.archive.root) });
       this.ready = true;
     } catch (error) {
       this.report(error);
@@ -1636,10 +1804,10 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     try {
       await this.flushAll();
       if (this.pending.size) throw Error("Some edits could not be saved. Fix the storage error before changing folders.");
-      const target = import_node_path2.default.join(directory, Archive.vaultId(this.app.vault.adapter instanceof import_obsidian2.FileSystemAdapter ? this.app.vault.adapter.getBasePath() : ""));
+      const target = import_node_path2.default.join(directory, import_node_path2.default.basename(this.archive.root));
       await this.archive.relocate(target, async () => {
         if (this.stopped) throw Error("The plugin was unloaded. The original archive is still active.");
-        await this.updateSettings({ archiveDirectory: directory });
+        await this.updateSettings({ archiveDirectory: directory, archiveSubfolder: import_node_path2.default.basename(target) });
       });
       this.refreshViews();
       this.refreshEditors();

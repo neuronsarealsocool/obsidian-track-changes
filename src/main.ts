@@ -16,7 +16,7 @@ const VIEW='track-changes-review';
 // module reloads so the next instance scans only after the old writer finishes.
 const handoffKey=Symbol.for('obsidian-track-changes.archive-handoffs');
 const handoffs:Map<string,Promise<unknown>>=(globalThis as any)[handoffKey]??=((new Map<string,Promise<unknown>>()));
-interface Settings {archiveDirectory:string;highlights:boolean;redDeletions:boolean;saveDelayMs:number}
+interface Settings {archiveDirectory:string;archiveSubfolder?:string;highlights:boolean;redDeletions:boolean;saveDelayMs:number}
 interface Pending {content:string;first:number;last:number}
 export default class TrackChanges extends Plugin {
   settings:Settings={archiveDirectory:path.join(os.homedir(),'Obsidian Track Changes History'),highlights:true,redDeletions:false,saveDelayMs:800};
@@ -29,7 +29,8 @@ export default class TrackChanges extends Plugin {
     this.settings.saveDelayMs=Math.max(200,Math.min(5000,Number(this.settings.saveDelayMs)||800));
     if(!(this.app.vault.adapter instanceof FileSystemAdapter))throw Error('Track Changes requires a desktop filesystem vault.');
     const vaultPath=this.app.vault.adapter.getBasePath();
-    this.archive=new Archive(path.join(this.settings.archiveDirectory,Archive.vaultId(vaultPath)));
+    const folder=this.settings.archiveSubfolder;
+    this.archive=new Archive(path.join(this.settings.archiveDirectory,folder&&path.basename(folder)===folder&&!['.','..'].includes(folder)?folder:Archive.vaultId(vaultPath)),{id:Archive.vaultId(vaultPath),name:path.basename(vaultPath)});
     this.registerView(VIEW,leaf=>new ReviewView(leaf,this));
     this.addSettingTab(new TrackSettings(this.app,this));
     this.addRibbonIcon('history','Track Changes: browse revision history',()=>void this.openReview());
@@ -43,7 +44,7 @@ export default class TrackChanges extends Plugin {
     this.app.workspace.onLayoutReady(()=>{if(this.stopped)return;this.startupTimer=window.setTimeout(()=>{this.startupTimer=undefined;this.startup=this.startTracking(status).catch(error=>{this.ready=false;this.report(error);status.setText('Track Changes: startup error');});},0);});
   }
   private async startTracking(status:HTMLElement){
-    try{await handoffs.get(this.archive.root);handoffs.delete(this.archive.root);await this.archive.init();if(this.stopped)return;this.ready=true;}catch(error){this.report(error);status.setText('Track Changes: archive error');return;}
+    try{await handoffs.get(this.archive.root);handoffs.delete(this.archive.root);await this.archive.init();if(this.stopped)return;if(this.settings.archiveSubfolder!==path.basename(this.archive.root))await this.updateSettings({archiveSubfolder:path.basename(this.archive.root)});this.ready=true;}catch(error){this.report(error);status.setText('Track Changes: archive error');return;}
     this.registerEvent(this.app.vault.on('modify',file=>{if(file instanceof TFile&&file.extension==='md')void this.captureDisk(file);}));
     this.registerEvent(this.app.vault.on('create',file=>{if(file instanceof TFile&&file.extension==='md')void this.captureDisk(file);}));
     this.registerEvent(this.app.workspace.on('file-open',file=>{if(file?.extension==='md')void this.captureDisk(file);this.refreshViews();}));
@@ -95,10 +96,10 @@ export default class TrackChanges extends Plugin {
     this.changingDirectory=true;
     try{
       await this.flushAll();if(this.pending.size)throw Error('Some edits could not be saved. Fix the storage error before changing folders.');
-      const target=path.join(directory,Archive.vaultId(this.app.vault.adapter instanceof FileSystemAdapter?this.app.vault.adapter.getBasePath():''));
+      const target=path.join(directory,path.basename(this.archive.root));
       await this.archive.relocate(target,async()=>{
         if(this.stopped)throw Error('The plugin was unloaded. The original archive is still active.');
-        await this.updateSettings({archiveDirectory:directory});
+        await this.updateSettings({archiveDirectory:directory,archiveSubfolder:path.basename(target)});
       });
       this.refreshViews();this.refreshEditors();
     }finally{this.changingDirectory=false;}

@@ -198,16 +198,16 @@
   } finally {cm?.destroy();mount.remove();}
   instance.app=app;
   const sourceRoot=instance.archive.root,folder=require('path').join(globalThis.__trackChangesTestDirectory,`moved history (${Date.now()})`);
-  const sourceDoc=instance.archive.get('fixture.md'),sourceNames=await instance.archive.list(sourceDoc.docId);
+  const sourceDoc=instance.archive.get('fixture.md'),sourceNames=await instance.archive.list(sourceDoc.docId),originalDocDirectory=instance.archive.directory(sourceDoc.docId);
   let invalidRefused=false;try{await instance.changeHistoryDirectory('C:relative-folder');}catch{invalidRefused=true;}
   assert(invalidRefused&&instance.archive.root===sourceRoot,'A drive-relative history folder is refused without changing the active archive');
   await instance.changeHistoryDirectory(folder);
-  assert(instance.archive.root===require('path').join(folder,real.archive.constructor.vaultId(app.vault.adapter.getBasePath()))&&savedSettings.archiveDirectory===folder,'History folder saves and switches immediately to the chosen Windows directory');
+  assert(instance.archive.root===require('path').join(folder,require('path').basename(sourceRoot))&&savedSettings.archiveDirectory===folder,'History folder saves and switches immediately to the chosen Windows directory');
   assert(JSON.stringify(await instance.archive.list(sourceDoc.docId))===JSON.stringify(sourceNames),'Changing history folders preserves every existing revision');
   const reopened=new real.archive.constructor(instance.archive.root);await reopened.init();
   assert(reopened.get('fixture.md').id===sourceDoc.id&&reopened.get('fixture.md').baseline===sourceDoc.baseline,'The copied history and comparison baseline survive archive restart');
   await instance.capture('migration-fixture.md','Future history');
-  assert(!require('fs').existsSync(require('path').join(sourceRoot,instance.archive.get('migration-fixture.md').docId))&&require('fs').existsSync(require('path').join(sourceRoot,sourceDoc.docId,sourceNames[0])),'Future saves use the new directory and the original history copy is retained');
+  assert(!require('fs').existsSync(require('path').join(sourceRoot,require('path').basename(instance.archive.directory(instance.archive.get('migration-fixture.md').docId))))&&require('fs').existsSync(require('path').join(originalDocDirectory,sourceNames[0])),'Future saves use the new directory and the original history copy is retained');
   await instance.archive.idle();
   instance.schedule('shutdown-fixture.md','Pending text at unload');
   instance.onunload();

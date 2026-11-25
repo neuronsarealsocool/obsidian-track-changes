@@ -59,12 +59,12 @@ test('concurrent snapshots serialize without losing any distinct version',async(
 });
 test('corrupt revisions surface an error and remain intact; unfinished temp files are ignored',async()=>{
   const a=await fresh('corrupt');const first=await a.save('note.md','Original');const latest=await a.save('note.md','Changed');
-  const bad=path.join(a.root,first.docId,`${latest.id}.json.gz`);await fs.writeFile(bad,'broken archive');
-  await fs.writeFile(path.join(a.root,first.docId,'unfinished.tmp'),'partial');
+  const bad=path.join(a.directory(first.docId),(await a.list(first.docId))[0]);await fs.writeFile(bad,'broken archive');
+  await fs.writeFile(path.join(a.directory(first.docId),'unfinished.tmp'),'partial');
   const b=new Archive(a.root);await assert.rejects(b.init(),/Unreadable archive/);assert.equal(await fs.readFile(bad,'utf8'),'broken archive');assert.equal(b.docs.get(first.docId)?.content,'Original');
 });
 test('a failed write never discards previous revisions and later saves can succeed',async()=>{
-  const a=await fresh('failure');const first=await a.save('note.md','Original');const dir=path.join(a.root,first.docId),moved=`${dir}-saved`;
+  const a=await fresh('failure');const first=await a.save('note.md','Original');const dir=a.directory(first.docId),moved=`${dir}-saved`;
   await fs.rename(dir,moved);await fs.writeFile(dir,'blocked');await assert.rejects(a.save('note.md','Not saved'));
   assert.equal(a.get('note.md')?.content,'Original');await fs.unlink(dir);await fs.rename(moved,dir);await a.save('note.md','Saved after repair');assert.equal((await a.list(first.docId)).length,2);
 });

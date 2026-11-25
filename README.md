@@ -41,7 +41,21 @@ Updating to 0.6.0 preserves existing comparison baselines and archived revisions
 
 ## Storage and limits
 
-By default, archives live in `~/Obsidian Track Changes History/<vault-id>/`. Open **Settings → Track Changes → History folder** to choose any writable absolute Windows directory, such as `D:\Backups\Track Changes` or `\\server\share\History`, then click **Save history here**. The plugin adds a separate `<vault-id>` subfolder and displays the complete active path below the field.
+By default, archives live under `~/Obsidian Track Changes History/`. Open **Settings → Track Changes → History folder** to choose any writable absolute Windows directory, such as `D:\Backups\Track Changes` or `\\server\share\History`, then click **Save history here**. The plugin adds a separate dated vault folder and displays the complete active path below the field.
+
+Folders and revision filenames use local dates and times, with milliseconds and a UTC offset. For example:
+
+```text
+Track Changes/
+  2026-11-25_14-30-00.000_UTC+1100 - My vault/
+    2026-11-25_14-31-12.045_UTC+1100 - My note/
+      2026-11-25_14-31-12.045_UTC+1100.json.gz
+      2026-11-25_14-35-06.128_UTC+1100.json.gz
+```
+
+The vault folder uses its archive creation time; the note folder uses its first captured revision. Note folder labels remain stable after later note renames, which are tracked inside the snapshots. Windows-invalid characters are replaced, and duplicate names receive a numbered suffix. Internal IDs remain inside the saved records, keeping renamed, deleted, and recreated notes separate. Files are ordered by their actual timestamp, including across daylight-saving clock changes.
+
+Version 0.9.0 automatically renames older hash/UUID archive paths and epoch-based revision filenames. Snapshot contents and internal IDs are preserved byte for byte. Already-readable names stay stable on restart. The small `.vault.json` file identifies the vault if a settings update is interrupted. Separately preserved legacy backup folders remain intact.
 
 Changing the folder copies and verifies all saved revisions before switching future saves to the new location. It works immediately without reloading. Edits made during copying are queued and saved after the switch; the original archive remains as a retained copy. The old copy is not updated with future edits. If copying, verification, or saving the preference fails, the original location remains active. Different history already at the destination is never overwritten; choose an empty folder in that case. Moving or renaming the vault itself changes its vault identifier; keep the old archive and migrate its subfolder if necessary.
 
@@ -93,7 +107,7 @@ Tests cover exact diff reconstruction, Unicode and CRLF, randomized edits, large
 
 ## Recovery format
 
-Each document has its own UUID directory containing `<monotonic-timestamp>-<uuid>.json.gz`. Decompress any individual file with a gzip utility and read its `content` field to recover that complete version without Obsidian. `baseline` is the comparison text at that revision (the accepted text in earlier releases); `aliases` records observed names. Keep the complete archive folder in backups.
+Each document has its own dated, named directory containing date-and-time `.json.gz` files. Decompress any individual file with a gzip utility and read its `content` field to recover that complete version without Obsidian. `docId` and `id` retain stable internal identities; `baseline` is the comparison text at that revision (the accepted text in earlier releases); `aliases` records observed names. Keep the complete archive folder in backups.
 
 ## License
 
