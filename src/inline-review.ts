@@ -16,12 +16,22 @@ interface ReviewHost {
 interface InPlacePreview {path:string;base:string;original:string;index:number;range:TextRange;text:string}
 type SetPreview=(view:EditorView,preview:InPlacePreview|null)=>void;
 class HistoricalText extends WidgetType {
-  constructor(readonly text:string,readonly index:number){super();}
-  eq(other:HistoricalText){return this.text===other.text&&this.index===other.index;}
+  constructor(readonly text:string,readonly current:string,readonly index:number){super();}
+  eq(other:HistoricalText){return this.text===other.text&&this.current===other.current&&this.index===other.index;}
   toDOM(){
     const el=document.createElement('span');el.className='tc-inplace-preview';el.dataset.tcArea=String(this.index);el.contentEditable='false';
     el.setAttribute('aria-label','Temporary historical revision preview');el.setAttribute('role','note');
-    const text=document.createElement('span');text.className='tc-inplace-text';text.textContent=this.text||'(Area not present in this revision)';el.appendChild(text);return el;
+    const text=document.createElement('span');text.className='tc-inplace-text';el.appendChild(text);
+    let offset=0;
+    for(const change of changes(this.current,this.text,true)){
+      text.appendChild(document.createTextNode(this.current.slice(offset,change.oldFrom)));
+      if(change.removed){const removed=document.createElement('del');removed.className='tc-preview-deletion tc-deletion';removed.textContent=change.removed;removed.setAttribute('aria-label',`Current text removed in this preview: ${change.removed}`);text.appendChild(removed);}
+      if(change.added){const added=document.createElement('ins');added.className='tc-preview-addition tc-addition';added.textContent=change.added;added.setAttribute('aria-label',`Selected revision text: ${change.added}`);text.appendChild(added);}
+      offset=change.oldTo;
+    }
+    text.appendChild(document.createTextNode(this.current.slice(offset)));
+    if(!this.text){const empty=document.createElement('span');empty.className='tc-preview-empty';empty.textContent='(Area not present in this revision)';text.appendChild(empty);}
+    return el;
   }
   ignoreEvent(){return true;}
 }
@@ -73,7 +83,7 @@ class ReviewBox extends WidgetType {
     let loading=false;
     const current=()=>view.state.doc.toString()===this.text&&this.host.archive.get(this.path)?.baseline===this.base;
     const renderHistory=()=>{
-      status.textContent=loading?'Loading earlier revisions…':history.position===0?'Current text':`Preview in note · ${history.selected.label?`${history.selected.label} · `:''}${new Date(history.selected.time!).toLocaleString()}`;
+      status.textContent=loading?'Loading earlier revisions…':history.position===0?'Current text':`Preview vs current · ${history.selected.label?`${history.selected.label} · `:''}${new Date(history.selected.time!).toLocaleString()}`;
       previous.disabled=loading||!history.hasOlder;next.disabled=loading||!history.hasNewer;
       restore.hidden=history.position===0;restore.disabled=loading||history.selected.text===history.entries[0].text;
       cancel.hidden=history.position===0;cancel.disabled=loading;
@@ -135,7 +145,7 @@ export function reviewExtension(host:ReviewHost){
       }
       if(preview){
         const {from,to}=preview.range;
-        const widget=new HistoricalText(preview.text,preview.index);
+        const widget=new HistoricalText(preview.text,preview.original.slice(from,to),preview.index);
         if(from<to)ranges.push(Decoration.replace({widget,inclusive:false}).range(from,to));
         else ranges.push(Decoration.widget({widget,side:-1}).range(from));
       }

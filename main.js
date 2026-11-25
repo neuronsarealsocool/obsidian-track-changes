@@ -819,13 +819,14 @@ var AreaHistory = class {
 
 // src/inline-review.ts
 var HistoricalText = class extends import_view.WidgetType {
-  constructor(text, index) {
+  constructor(text, current, index) {
     super();
     this.text = text;
+    this.current = current;
     this.index = index;
   }
   eq(other) {
-    return this.text === other.text && this.index === other.index;
+    return this.text === other.text && this.current === other.current && this.index === other.index;
   }
   toDOM() {
     const el = document.createElement("span");
@@ -836,8 +837,33 @@ var HistoricalText = class extends import_view.WidgetType {
     el.setAttribute("role", "note");
     const text = document.createElement("span");
     text.className = "tc-inplace-text";
-    text.textContent = this.text || "(Area not present in this revision)";
     el.appendChild(text);
+    let offset = 0;
+    for (const change of changes(this.current, this.text, true)) {
+      text.appendChild(document.createTextNode(this.current.slice(offset, change.oldFrom)));
+      if (change.removed) {
+        const removed = document.createElement("del");
+        removed.className = "tc-preview-deletion tc-deletion";
+        removed.textContent = change.removed;
+        removed.setAttribute("aria-label", `Current text removed in this preview: ${change.removed}`);
+        text.appendChild(removed);
+      }
+      if (change.added) {
+        const added = document.createElement("ins");
+        added.className = "tc-preview-addition tc-addition";
+        added.textContent = change.added;
+        added.setAttribute("aria-label", `Selected revision text: ${change.added}`);
+        text.appendChild(added);
+      }
+      offset = change.oldTo;
+    }
+    text.appendChild(document.createTextNode(this.current.slice(offset)));
+    if (!this.text) {
+      const empty = document.createElement("span");
+      empty.className = "tc-preview-empty";
+      empty.textContent = "(Area not present in this revision)";
+      text.appendChild(empty);
+    }
     return el;
   }
   ignoreEvent() {
@@ -978,7 +1004,7 @@ var ReviewBox = class extends import_view.WidgetType {
     let loading = false;
     const current = () => view.state.doc.toString() === this.text && this.host.archive.get(this.path)?.baseline === this.base;
     const renderHistory = () => {
-      status.textContent = loading ? "Loading earlier revisions\u2026" : history.position === 0 ? "Current text" : `Preview in note \xB7 ${history.selected.label ? `${history.selected.label} \xB7 ` : ""}${new Date(history.selected.time).toLocaleString()}`;
+      status.textContent = loading ? "Loading earlier revisions\u2026" : history.position === 0 ? "Current text" : `Preview vs current \xB7 ${history.selected.label ? `${history.selected.label} \xB7 ` : ""}${new Date(history.selected.time).toLocaleString()}`;
       previous.disabled = loading || !history.hasOlder;
       next.disabled = loading || !history.hasNewer;
       restore.hidden = history.position === 0;
@@ -1075,7 +1101,7 @@ function reviewExtension(host) {
       }
       if (preview2) {
         const { from, to } = preview2.range;
-        const widget = new HistoricalText(preview2.text, preview2.index);
+        const widget = new HistoricalText(preview2.text, preview2.original.slice(from, to), preview2.index);
         if (from < to) ranges.push(import_view.Decoration.replace({ widget, inclusive: false }).range(from, to));
         else ranges.push(import_view.Decoration.widget({ widget, side: -1 }).range(from));
       }
