@@ -946,9 +946,11 @@ var Archive = class _Archive {
         }
         await import_node_fs.promises.rename(temporary, metadata);
       }
-      const oldRoot = this.root;
-      if (archiveDirectoryName(import_node_path.default.basename(oldRoot)) && !documentId.test(import_node_path.default.basename(oldRoot))) return;
-      const parent = import_node_path.default.dirname(oldRoot), base = `${dateStamp(new Date(created))} - ${safeName(this.vaultIdentity.name)}`;
+      const oldRoot = this.root, vaultName = safeName(this.vaultIdentity.name), leaf = import_node_path.default.basename(oldRoot);
+      const stampPattern = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.\d{3}_UTC[+-]\d{4}(?: \(\d+\))?$/;
+      if (leaf.startsWith(`${vaultName} - `) && stampPattern.test(leaf.slice(vaultName.length + 3))) return;
+      const existingStamp = leaf.match(/^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.\d{3}_UTC[+-]\d{4}) - /)?.[1];
+      const parent = import_node_path.default.dirname(oldRoot), base = `${vaultName} - ${existingStamp ?? dateStamp(new Date(created))}`;
       let target = import_node_path.default.join(parent, base), index = 2;
       while (target !== oldRoot) {
         try {

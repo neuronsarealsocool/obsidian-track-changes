@@ -29,12 +29,15 @@ test('legacy migration preserves every compressed byte, document identity, and r
     const id=`${1700000000000+i}-${randomUUID()}`,r:Revision={schema:1,id,docId,time:new Date(1700000000000+i).toISOString(),path:'My note.md',aliases:['My note.md'],kind:'edit',content:`Version ${i}`,baseline:'Version 0',deleted:false,areaAnchors:[{id:'area',from:0,to:9,previousText:'Other text'}]};
     records.push(r);const data=gzipSync(JSON.stringify(r));bytes.set(id,data);await fs.writeFile(path.join(root,docId,`${id}.json.gz`),data);
   }
-  const a=new Archive(root,{id:vaultId,name:'Example vault'});await a.init();assert.notEqual(a.root,root);assert.match(path.basename(a.root),/^\d{4}-\d{2}-\d{2}_.* - Example vault$/);
+  const a=new Archive(root,{id:vaultId,name:'Example vault'});await a.init();assert.notEqual(a.root,root);assert.match(path.basename(a.root),/^Example vault - \d{4}-\d{2}-\d{2}_/);
   assert.match(path.basename(a.directory(docId)),/ - My note$/);const names=await a.list(docId);assert.equal(names.length,3);
   for(const name of names){const r=await a.load(docId,name);assert.deepEqual(await fs.readFile(path.join(a.directory(docId),name)),bytes.get(r.id));}
   assert.equal(a.get('My note.md')!.id,records[2].id);assert.deepEqual(a.get('My note.md')!.areaAnchors,records[2].areaAnchors);
   const b=new Archive(root,{id:vaultId,name:'Example vault'});await b.init();assert.equal(b.root,a.root);assert.deepEqual(await b.list(docId),names);
   await b.save('My note.md','A future version');assert.equal((await b.list(docId)).length,4);
+  const datedFirst=path.join(parent,'2026-11-23_19-52-06.450_UTC+1100 - Example vault');await fs.rename(b.root,datedFirst);
+  const c=new Archive(datedFirst,{id:vaultId,name:'Example vault'});await c.init();assert.equal(path.basename(c.root),'Example vault - 2026-11-23_19-52-06.450_UTC+1100');
+  assert.equal((await c.list(docId)).length,4);const d=new Archive(c.root,{id:vaultId,name:'Example vault'});await d.init();assert.equal(d.root,c.root);
 });
 
 test('same-time notes with the same title remain independent and reload under their original identities',async()=>{

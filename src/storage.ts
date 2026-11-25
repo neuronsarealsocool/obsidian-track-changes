@@ -82,8 +82,11 @@ export class Archive {
         try{await handle.writeFile(JSON.stringify({schema:1,vaultId:this.vaultIdentity.id,name:this.vaultIdentity.name,created},null,2));await handle.sync();}finally{await handle.close();}
         await fs.rename(temporary,metadata);
       }
-      const oldRoot=this.root;if(archiveDirectoryName(path.basename(oldRoot))&&!documentId.test(path.basename(oldRoot)))return;
-      const parent=path.dirname(oldRoot),base=`${dateStamp(new Date(created))} - ${safeName(this.vaultIdentity.name)}`;
+      const oldRoot=this.root,vaultName=safeName(this.vaultIdentity.name),leaf=path.basename(oldRoot);
+      const stampPattern=/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.\d{3}_UTC[+-]\d{4}(?: \(\d+\))?$/;
+      if(leaf.startsWith(`${vaultName} - `)&&stampPattern.test(leaf.slice(vaultName.length+3)))return;
+      const existingStamp=leaf.match(/^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.\d{3}_UTC[+-]\d{4}) - /)?.[1];
+      const parent=path.dirname(oldRoot),base=`${vaultName} - ${existingStamp??dateStamp(new Date(created))}`;
       let target=path.join(parent,base),index=2;
       while(target!==oldRoot){try{await fs.access(target);target=path.join(parent,`${base} (${index++})`);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')break;throw error;}}
       if(target!==oldRoot){await fs.rename(oldRoot,target);this.root=target;}

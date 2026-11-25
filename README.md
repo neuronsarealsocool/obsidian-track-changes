@@ -47,7 +47,7 @@ Folders and revision filenames use local dates and times, with milliseconds and 
 
 ```text
 Track Changes/
-  2026-11-25_14-30-00.000_UTC+1100 - My vault/
+  My vault - 2026-11-25_14-30-00.000_UTC+1100/
     2026-11-25_14-31-12.045_UTC+1100 - My note/
       2026-11-25_14-31-12.045_UTC+1100.json.gz
       2026-11-25_14-35-06.128_UTC+1100.json.gz
