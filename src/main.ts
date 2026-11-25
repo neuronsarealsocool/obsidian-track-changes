@@ -6,7 +6,7 @@ import os from 'node:os';
 import {Archive,Revision} from './storage';
 import {Change,rejectOne} from './changes';
 import {reviewExtension} from './inline-review';
-import {acceptReviewArea,reviewAreas} from './review-areas';
+import {acceptReviewArea} from './review-areas';
 import {TextRange} from './area-history';
 import {repairAcceptedHistory} from './acceptance-repair';
 
@@ -29,10 +29,10 @@ export default class TrackChanges extends Plugin {
     this.archive=new Archive(path.join(this.settings.archiveDirectory,Archive.vaultId(vaultPath)));
     this.registerView(VIEW,leaf=>new ReviewView(leaf,this));
     this.addSettingTab(new TrackSettings(this.app,this));
-    this.addRibbonIcon('history','Track Changes: review edits and history',()=>void this.openReview());
-    this.addCommand({id:'review',name:'Review tracked changes and history',callback:()=>void this.openReview()});
+    this.addRibbonIcon('history','Track Changes: browse revision history',()=>void this.openReview());
+    this.addCommand({id:'review',name:'Browse revision history',callback:()=>void this.openReview()});
     this.addCommand({id:'checkpoint',name:'Save a named checkpoint',editorCallback:(editor,view)=>{if(view.file)new NameModal(this.app,'Name this checkpoint',label=>this.capture(view.file!.path,editor.getValue(),'checkpoint',{label})).open();}});
-    this.addCommand({id:'toggle-highlights',name:'Toggle inline change highlights',callback:()=>{this.settings.highlights=!this.settings.highlights;void this.saveData(this.settings);this.refreshEditors();new Notice(`Track Changes highlights ${this.settings.highlights?'on':'off'}`);}});
+    this.addCommand({id:'toggle-highlights',name:'Toggle inline revision markers',callback:()=>{this.settings.highlights=!this.settings.highlights;void this.saveData(this.settings);this.refreshEditors();new Notice(`Track Changes revision markers ${this.settings.highlights?'on':'off'}`);}});
     const status=this.addStatusBarItem();status.setText('Track Changes: loading');
     // Restored sidebar leaves may still be DeferredViews during startup.
     // Let Obsidian finish its layout before scanning an existing archive.
@@ -174,21 +174,8 @@ class ReviewView extends ItemView {
     if(!doc){root.createEl('p',{text:'Open a Markdown note, or browse all notes to recover a deleted document.'});return;}
     root.createEl('h3',{text:doc.path+(doc.deleted?' (deleted)':'')});
     if(!doc.deleted){
-      const current=p.current(doc.path),base=doc.baseline,edits=reviewAreas(base,current);
-      root.createEl('p',{text:`${edits.length} pending change${edits.length===1?'':'s'} since the last accepted version.`});
       const actions=root.createDiv({cls:'tc-tools'});
-      button(actions,'Accept all',async()=>{await p.applyChange(doc.path,current,base,undefined,true);await this.render();},true);
-      button(actions,'Reject all',()=>new ConfirmModal(p.app,'Reject all pending changes?','The current text will be saved to history before restoring the accepted version.',async()=>{await p.applyChange(doc.path,current,base,undefined,false);await this.render();}).open());
       button(actions,'Checkpoint',()=>new NameModal(p.app,'Name this checkpoint',label=>p.capture(doc.path,p.current(doc.path),'checkpoint',{label})).open());
-      // Render bounded cards; every edit remains in the complete diff and Accept/Reject all.
-      for(const [i,c] of edits.slice(0,100).entries()){
-        const card=root.createDiv({cls:'tc-change'});card.createEl('strong',{text:`Change ${i+1}`});
-        if(c.removed)card.createEl('del',{text:c.removed});if(c.added)card.createEl('ins',{text:c.added});
-        const row=card.createDiv({cls:'tc-tools'});
-        button(row,'Accept',async()=>{await p.applyChange(doc.path,current,base,c,true);await this.render();});
-        button(row,'Reject',async()=>{await p.applyChange(doc.path,current,base,c,false);await this.render();});
-      }
-      if(edits.length>100)root.createEl('p',{text:'Showing the first 100 changes. Review these to reveal the remaining changes, or use Accept all / Reject all.'});
     }
     root.createEl('h3',{text:'Revision history'});
     const names=await p.archive.list(doc.docId);if(gen!==this.generation||this.disposed)return;
@@ -236,10 +223,10 @@ class TrackSettings extends PluginSettingTab {
   constructor(app:App,readonly plugin:TrackChanges){super(app,plugin);}
   display(){const root=this.containerEl,p=this.plugin;root.empty();root.createEl('h2',{text:'Track Changes'});
     root.createEl('p',{text:'History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version.'});
-    new Setting(root).setName('Inline highlights and review boxes').setDesc('Show word highlights, Accept / Reject controls, and Previous / Next revisions of the hovered area.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{p.settings.highlights=value;await p.saveData(p.settings);p.refreshEditors();}));
+    new Setting(root).setName('Inline revision markers and history boxes').setDesc('Show struck-through old text and Previous / Next revisions when hovering a changed area.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{p.settings.highlights=value;await p.saveData(p.settings);p.refreshEditors();}));
     let directory=p.settings.archiveDirectory;
     new Setting(root).setName('Archive directory').setDesc('Absolute folder outside the vault. A separate subfolder is used for each vault. Changing it requires a plugin reload; move the existing vault history folder yourself to keep continuity.').addText(t=>t.setValue(directory).onChange(value=>{directory=value.trim();})).addButton(b=>b.setButtonText('Save for next reload').onClick(async()=>{if(!path.isAbsolute(directory)){new Notice('Choose an absolute folder path.');return;}p.settings.archiveDirectory=directory;await p.saveData(p.settings);new Notice('Saved. Reload the plugin to use this directory. Existing history has not been moved.');}));
     root.createEl('p',{text:`Active archive: ${p.archive?.root??'Not initialized'}`,cls:'tc-archive-path'});
-    root.createEl('p',{text:'Accepting changes updates the accepted version; it never deletes revisions. Rejecting and restoring save the current text first. Deleted notes remain in Browse all notes. Highlights describe edits since the accepted version, not collaborator suggestions or author attribution.'});
+    root.createEl('p',{text:'Old text is struck through to mark changed areas; current text keeps its normal appearance. Hover an area to browse its revisions. Restoring saves the current text first. Deleted notes remain in Browse all notes. Existing comparison baselines and all archived revisions are preserved.'});
   }
 }

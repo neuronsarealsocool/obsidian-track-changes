@@ -1000,10 +1000,6 @@ var DeletedText = class extends import_view.WidgetType {
     return span;
   }
 };
-function preview(text) {
-  const value = text.replace(/\r?\n/g, " \u21B5 ");
-  return value.trim() ? value.length > 130 ? `${value.slice(0, 130)}\u2026` : value : "Whitespace";
-}
 var ReviewBox = class extends import_view.WidgetType {
   constructor(host, path3, base, text, area, index, total, setPreview) {
     super();
@@ -1025,42 +1021,13 @@ var ReviewBox = class extends import_view.WidgetType {
     wrapper.contentEditable = "false";
     wrapper.dataset.tcArea = String(this.index);
     const card = document.createElement("div");
-    card.className = "tc-inline-review is-active";
+    card.className = "tc-inline-review";
     card.setAttribute("role", "group");
-    card.setAttribute("aria-label", `Review change ${this.index + 1} of ${this.total}`);
+    card.setAttribute("aria-label", "This area\u2019s revisions");
     card.dataset.changeIndex = String(this.index);
     card.dataset.from = String(this.area.from);
     wrapper.appendChild(card);
-    const heading = document.createElement("div");
-    heading.className = "tc-inline-header";
-    card.appendChild(heading);
-    const title = document.createElement("span");
-    title.className = "tc-inline-title";
-    title.textContent = this.area.removed ? this.area.added ? "Changed text" : "Deleted text" : "Added text";
-    heading.appendChild(title);
-    const count = document.createElement("span");
-    count.className = "tc-inline-count";
-    count.textContent = "Pending edit";
-    heading.appendChild(count);
-    const summary = document.createElement("div");
-    summary.className = "tc-inline-preview";
-    card.appendChild(summary);
-    if (this.area.removed) {
-      const old = document.createElement("del");
-      old.textContent = preview(this.area.removed);
-      old.setAttribute("aria-label", `Previous text: ${this.area.removed}`);
-      summary.appendChild(old);
-    }
-    if (this.area.added) {
-      const added = document.createElement("ins");
-      added.textContent = preview(this.area.added);
-      added.setAttribute("aria-label", `New text: ${this.area.added}`);
-      summary.appendChild(added);
-    }
-    const controls = document.createElement("div");
-    controls.className = "tc-inline-controls";
-    card.appendChild(controls);
-    const addButton = (label, action, run, disabled = false, parent = controls) => {
+    const addButton = (label, action, run, disabled, parent) => {
       const button2 = document.createElement("button");
       button2.type = "button";
       button2.textContent = label;
@@ -1075,26 +1042,6 @@ var ReviewBox = class extends import_view.WidgetType {
       parent.appendChild(button2);
       return button2;
     };
-    const decide = async (accept2) => {
-      if (card.getAttribute("aria-busy") === "true") return;
-      const enabled = Array.from(card.querySelectorAll("button")).filter((b) => !b.disabled);
-      enabled.forEach((b) => b.disabled = true);
-      card.setAttribute("aria-busy", "true");
-      try {
-        if (view.state.doc.toString() !== this.text) throw Error("The note changed while reviewing. Use its updated review box.");
-        this.setPreview(view, null);
-        await this.host.applyChange(this.path, this.text, this.base, this.area, accept2);
-        view.dispatch({});
-      } catch (error) {
-        new import_obsidian.Notice(String(error), 9e3);
-      } finally {
-        card.removeAttribute("aria-busy");
-        enabled.forEach((b) => b.disabled = false);
-      }
-    };
-    const accept = addButton("Accept", "accept", () => decide(true));
-    accept.classList.add("tc-inline-accept");
-    const reject = addButton("Reject", "reject", () => decide(false));
     const origin = this.area.paragraphFrom === void 0 && this.area.from === this.area.to ? { document: this.base, range: { from: this.area.oldFrom, to: this.area.oldTo } } : void 0;
     const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area), origin);
     const section = document.createElement("div");
@@ -1124,8 +1071,6 @@ var ReviewBox = class extends import_view.WidgetType {
       restore.disabled = loading || history.selected.text === history.entries[0].text;
       cancel.hidden = history.position === 0;
       cancel.disabled = loading;
-      accept.disabled = loading || history.position > 0;
-      reject.disabled = loading || history.position > 0;
       note.textContent = !history.hasOlder ? history.stopReason : "";
       note.hidden = !note.textContent;
       if (card.isConnected && current()) this.setPreview(view, history.position === 0 ? null : { path: this.path, base: this.base, original: this.text, index: this.index, range: history.currentRange, text: history.selected.text });
@@ -1184,15 +1129,15 @@ var ReviewBox = class extends import_view.WidgetType {
     return true;
   }
   get estimatedHeight() {
-    return 132;
+    return 88;
   }
 };
 function reviewExtension(host) {
   const reveal = import_state.StateEffect.define();
   const previewEffect = import_state.StateEffect.define();
   const samePreview = (a, b) => a === b || !!a && !!b && a.path === b.path && a.base === b.base && a.original === b.original && a.index === b.index && a.range.from === b.range.from && a.range.to === b.range.to && a.text === b.text;
-  const setPreview = (view, preview2) => {
-    if (!samePreview(view.state.field(field).preview, preview2)) view.dispatch({ effects: previewEffect.of(preview2) });
+  const setPreview = (view, preview) => {
+    if (!samePreview(view.state.field(field).preview, preview)) view.dispatch({ effects: previewEffect.of(preview) });
   };
   function build(state, previous, requested = null, requestedPreview = null) {
     const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, base = path3 ? host.archive.get(path3)?.baseline : void 0;
@@ -1201,19 +1146,19 @@ function reviewExtension(host) {
     const areas = unchanged ? previous.areas : enabled && base !== void 0 && text.length + base.length <= 15e4 ? reviewAreas(base, text) : [];
     const raw = unchanged ? previous.raw : areas.flatMap((area, areaIndex) => changes(area.removed, area.added, true).map((c) => ({ ...c, from: c.from + area.from, to: c.to + area.from, oldFrom: c.oldFrom + area.oldFrom, oldTo: c.oldTo + area.oldFrom, areaIndex })));
     const hovered = unchanged && requested !== null && areas[requested] ? requested : null;
-    const preview2 = unchanged && hovered !== null && requestedPreview?.index === hovered && requestedPreview.path === path3 && requestedPreview.original === text && requestedPreview.base === base && requestedPreview.range.from >= 0 && requestedPreview.range.to <= text.length && requestedPreview.range.to >= requestedPreview.range.from ? requestedPreview : null;
-    if (unchanged && previous.hovered === hovered && samePreview(previous.preview, preview2)) return previous;
+    const preview = unchanged && hovered !== null && requestedPreview?.index === hovered && requestedPreview.path === path3 && requestedPreview.original === text && requestedPreview.base === base && requestedPreview.range.from >= 0 && requestedPreview.range.to <= text.length && requestedPreview.range.to >= requestedPreview.range.from ? requestedPreview : null;
+    if (unchanged && previous.hovered === hovered && samePreview(previous.preview, preview)) return previous;
     const ranges = [];
     if (path3 && base !== void 0 && areas.length) {
       for (const c of raw) {
         const areaIndex = c.areaIndex;
-        if (preview2 && areaIndex === preview2.index) continue;
+        if (preview && areaIndex === preview.index) continue;
         if (c.removed) ranges.push(import_view.Decoration.widget({ widget: new DeletedText(c.removed, areaIndex), side: -1 }).range(c.from));
         if (c.to > c.from) ranges.push(import_view.Decoration.mark({ class: "tc-addition", attributes: { "data-tc-area": String(areaIndex) } }).range(c.from, c.to));
       }
-      if (preview2) {
-        const { from, to } = preview2.range;
-        const widget = new HistoricalText(preview2.text, preview2.original.slice(from, to), preview2.index);
+      if (preview) {
+        const { from, to } = preview.range;
+        const widget = new HistoricalText(preview.text, preview.original.slice(from, to), preview.index);
         if (from < to) ranges.push(import_view.Decoration.replace({ widget, inclusive: false }).range(from, to));
         else ranges.push(import_view.Decoration.widget({ widget, side: -1 }).range(from));
       }
@@ -1222,15 +1167,15 @@ function reviewExtension(host) {
         ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length, setPreview), block: true, side: 1 }).range(state.doc.lineAt(anchor).to));
       }
     }
-    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, hovered, areas, raw, preview: preview2 };
+    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, hovered, areas, raw, preview };
   }
   const field = import_state.StateField.define({ create: (state) => build(state), update: (value, tr) => {
-    let hovered = value.hovered, preview2 = value.preview;
+    let hovered = value.hovered, preview = value.preview;
     for (const effect of tr.effects) {
       if (effect.is(reveal)) hovered = effect.value;
-      if (effect.is(previewEffect)) preview2 = effect.value;
+      if (effect.is(previewEffect)) preview = effect.value;
     }
-    return build(tr.state, value, hovered, preview2);
+    return build(tr.state, value, hovered, preview);
   }, provide: (f) => import_view.EditorView.decorations.from(f, (value) => value.decorations) });
   const capture = import_view.ViewPlugin.fromClass(class {
     constructor(view) {
@@ -1385,16 +1330,16 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     this.archive = new Archive(import_node_path2.default.join(this.settings.archiveDirectory, Archive.vaultId(vaultPath)));
     this.registerView(VIEW, (leaf) => new ReviewView(leaf, this));
     this.addSettingTab(new TrackSettings(this.app, this));
-    this.addRibbonIcon("history", "Track Changes: review edits and history", () => void this.openReview());
-    this.addCommand({ id: "review", name: "Review tracked changes and history", callback: () => void this.openReview() });
+    this.addRibbonIcon("history", "Track Changes: browse revision history", () => void this.openReview());
+    this.addCommand({ id: "review", name: "Browse revision history", callback: () => void this.openReview() });
     this.addCommand({ id: "checkpoint", name: "Save a named checkpoint", editorCallback: (editor, view) => {
       if (view.file) new NameModal(this.app, "Name this checkpoint", (label) => this.capture(view.file.path, editor.getValue(), "checkpoint", { label })).open();
     } });
-    this.addCommand({ id: "toggle-highlights", name: "Toggle inline change highlights", callback: () => {
+    this.addCommand({ id: "toggle-highlights", name: "Toggle inline revision markers", callback: () => {
       this.settings.highlights = !this.settings.highlights;
       void this.saveData(this.settings);
       this.refreshEditors();
-      new import_obsidian2.Notice(`Track Changes highlights ${this.settings.highlights ? "on" : "off"}`);
+      new import_obsidian2.Notice(`Track Changes revision markers ${this.settings.highlights ? "on" : "off"}`);
     } });
     const status = this.addStatusBarItem();
     status.setText("Track Changes: loading");
@@ -1749,34 +1694,8 @@ var ReviewView = class extends import_obsidian2.ItemView {
     }
     root.createEl("h3", { text: doc.path + (doc.deleted ? " (deleted)" : "") });
     if (!doc.deleted) {
-      const current = p.current(doc.path), base = doc.baseline, edits = reviewAreas(base, current);
-      root.createEl("p", { text: `${edits.length} pending change${edits.length === 1 ? "" : "s"} since the last accepted version.` });
       const actions = root.createDiv({ cls: "tc-tools" });
-      button(actions, "Accept all", async () => {
-        await p.applyChange(doc.path, current, base, void 0, true);
-        await this.render();
-      }, true);
-      button(actions, "Reject all", () => new ConfirmModal(p.app, "Reject all pending changes?", "The current text will be saved to history before restoring the accepted version.", async () => {
-        await p.applyChange(doc.path, current, base, void 0, false);
-        await this.render();
-      }).open());
       button(actions, "Checkpoint", () => new NameModal(p.app, "Name this checkpoint", (label) => p.capture(doc.path, p.current(doc.path), "checkpoint", { label })).open());
-      for (const [i, c] of edits.slice(0, 100).entries()) {
-        const card = root.createDiv({ cls: "tc-change" });
-        card.createEl("strong", { text: `Change ${i + 1}` });
-        if (c.removed) card.createEl("del", { text: c.removed });
-        if (c.added) card.createEl("ins", { text: c.added });
-        const row = card.createDiv({ cls: "tc-tools" });
-        button(row, "Accept", async () => {
-          await p.applyChange(doc.path, current, base, c, true);
-          await this.render();
-        });
-        button(row, "Reject", async () => {
-          await p.applyChange(doc.path, current, base, c, false);
-          await this.render();
-        });
-      }
-      if (edits.length > 100) root.createEl("p", { text: "Showing the first 100 changes. Review these to reveal the remaining changes, or use Accept all / Reject all." });
     }
     root.createEl("h3", { text: "Revision history" });
     const names = await p.archive.list(doc.docId);
@@ -1792,17 +1711,17 @@ var ReviewView = class extends import_obsidian2.ItemView {
       this.page++;
       void this.render();
     }).disabled = (this.page + 1) * 30 >= names.length;
-    const history = root.createDiv({ cls: "tc-history" }), preview2 = root.createDiv();
+    const history = root.createDiv({ cls: "tc-history" }), preview = root.createDiv();
     const entries = await Promise.all(names.slice(this.page * 30, this.page * 30 + 30).map(async (name) => ({ name, r: await p.archive.load(doc.docId, name) })));
     if (gen !== this.generation || this.disposed) return;
     for (const { name, r } of entries) {
       button(history, `${new Date(r.time).toLocaleString()} \xB7 ${r.label || r.kind}`, async () => {
         this.selectedRevision = r;
         this.selectionName = name;
-        await this.preview(preview2, r, name, names);
+        await this.preview(preview, r, name, names);
       });
     }
-    if (this.selectedRevision?.docId === doc.docId && this.selectionName) await this.preview(preview2, this.selectedRevision, this.selectionName, names);
+    if (this.selectedRevision?.docId === doc.docId && this.selectionName) await this.preview(preview, this.selectedRevision, this.selectionName, names);
   }
   renderNoteList(list) {
     list.empty();
@@ -1887,7 +1806,7 @@ var TrackSettings = class extends import_obsidian2.PluginSettingTab {
     root.empty();
     root.createEl("h2", { text: "Track Changes" });
     root.createEl("p", { text: "History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version." });
-    new import_obsidian2.Setting(root).setName("Inline highlights and review boxes").setDesc("Show word highlights, Accept / Reject controls, and Previous / Next revisions of the hovered area.").addToggle((t) => t.setValue(p.settings.highlights).onChange(async (value) => {
+    new import_obsidian2.Setting(root).setName("Inline revision markers and history boxes").setDesc("Show struck-through old text and Previous / Next revisions when hovering a changed area.").addToggle((t) => t.setValue(p.settings.highlights).onChange(async (value) => {
       p.settings.highlights = value;
       await p.saveData(p.settings);
       p.refreshEditors();
@@ -1905,6 +1824,6 @@ var TrackSettings = class extends import_obsidian2.PluginSettingTab {
       new import_obsidian2.Notice("Saved. Reload the plugin to use this directory. Existing history has not been moved.");
     }));
     root.createEl("p", { text: `Active archive: ${p.archive?.root ?? "Not initialized"}`, cls: "tc-archive-path" });
-    root.createEl("p", { text: "Accepting changes updates the accepted version; it never deletes revisions. Rejecting and restoring save the current text first. Deleted notes remain in Browse all notes. Highlights describe edits since the accepted version, not collaborator suggestions or author attribution." });
+    root.createEl("p", { text: "Old text is struck through to mark changed areas; current text keeps its normal appearance. Hover an area to browse its revisions. Restoring saves the current text first. Deleted notes remain in Browse all notes. Existing comparison baselines and all archived revisions are preserved." });
   }
 };

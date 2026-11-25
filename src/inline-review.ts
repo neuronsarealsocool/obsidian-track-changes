@@ -10,7 +10,6 @@ interface ReviewHost {
   archive:{get:(path:string)=>{baseline:string;docId:string}|undefined;list:AreaHistorySource['list'];load:AreaHistorySource['load']};
   capture:(path:string,text:string)=>Promise<unknown>;
   schedule:(path:string,text:string)=>void;
-  applyChange:(path:string,expected:string,base:string,change:Change|undefined,accept:boolean)=>Promise<void>;
   restoreAreaVersion:(path:string,expected:string,base:string,range:TextRange,text:string)=>Promise<void>;
 }
 interface InPlacePreview {path:string;base:string;original:string;index:number;range:TextRange;text:string}
@@ -40,40 +39,17 @@ class DeletedText extends WidgetType {
   eq(other:DeletedText){return other.text===this.text&&other.areaIndex===this.areaIndex;}
   toDOM(){const span=document.createElement('span');span.className='tc-deletion';span.textContent=this.text;span.dataset.tcArea=String(this.areaIndex);span.setAttribute('aria-label',`Deleted: ${this.text}`);return span;}
 }
-function preview(text:string){const value=text.replace(/\r?\n/g,' ↵ ');return value.trim()?value.length>130?`${value.slice(0,130)}…`:value:'Whitespace';}
-
 class ReviewBox extends WidgetType {
   constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number,readonly setPreview:SetPreview){super();}
   eq(other:ReviewBox){return this.host===other.host&&this.path===other.path&&this.base===other.base&&this.text===other.text&&this.index===other.index&&this.total===other.total;}
   toDOM(view:EditorView){
     const wrapper=document.createElement('div');wrapper.className='tc-inline-container';wrapper.contentEditable='false';wrapper.dataset.tcArea=String(this.index);
-    const card=document.createElement('div');card.className='tc-inline-review is-active';card.setAttribute('role','group');card.setAttribute('aria-label',`Review change ${this.index+1} of ${this.total}`);card.dataset.changeIndex=String(this.index);card.dataset.from=String(this.area.from);wrapper.appendChild(card);
-    const heading=document.createElement('div');heading.className='tc-inline-header';card.appendChild(heading);
-    const title=document.createElement('span');title.className='tc-inline-title';title.textContent=this.area.removed?this.area.added?'Changed text':'Deleted text':'Added text';heading.appendChild(title);
-    const count=document.createElement('span');count.className='tc-inline-count';count.textContent='Pending edit';heading.appendChild(count);
-    const summary=document.createElement('div');summary.className='tc-inline-preview';card.appendChild(summary);
-    if(this.area.removed){const old=document.createElement('del');old.textContent=preview(this.area.removed);old.setAttribute('aria-label',`Previous text: ${this.area.removed}`);summary.appendChild(old);}
-    if(this.area.added){const added=document.createElement('ins');added.textContent=preview(this.area.added);added.setAttribute('aria-label',`New text: ${this.area.added}`);summary.appendChild(added);}
-    const controls=document.createElement('div');controls.className='tc-inline-controls';card.appendChild(controls);
-    const addButton=(label:string,action:string,run:()=>unknown,disabled=false,parent=controls)=>{
+    const card=document.createElement('div');card.className='tc-inline-review';card.setAttribute('role','group');card.setAttribute('aria-label','This area’s revisions');card.dataset.changeIndex=String(this.index);card.dataset.from=String(this.area.from);wrapper.appendChild(card);
+    const addButton=(label:string,action:string,run:()=>unknown,disabled:boolean,parent:HTMLElement)=>{
       const button=document.createElement('button');button.type='button';button.textContent=label;button.dataset.action=action;button.disabled=disabled;
       button.setAttribute('aria-label',action==='previous'?'Previous revision of this area':action==='next'?'Next revision of this area':`${label} this changed area`);
       button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();void run();});parent.appendChild(button);return button;
     };
-    const decide=async(accept:boolean)=>{
-      if(card.getAttribute('aria-busy')==='true')return;
-      const enabled=Array.from(card.querySelectorAll<HTMLButtonElement>('button')).filter(b=>!b.disabled);
-      enabled.forEach(b=>b.disabled=true);card.setAttribute('aria-busy','true');
-      try{
-        if(view.state.doc.toString()!==this.text)throw Error('The note changed while reviewing. Use its updated review box.');
-        this.setPreview(view,null);await this.host.applyChange(this.path,this.text,this.base,this.area,accept);
-        // Also refresh disposable editors and other callers outside the workspace.
-        view.dispatch({});
-      }catch(error){new Notice(String(error),9000);}
-      finally{card.removeAttribute('aria-busy');enabled.forEach(b=>b.disabled=false);}
-    };
-    const accept=addButton('Accept','accept',()=>decide(true));accept.classList.add('tc-inline-accept');
-    const reject=addButton('Reject','reject',()=>decide(false));
     const origin=this.area.paragraphFrom===undefined&&this.area.from===this.area.to?{document:this.base,range:{from:this.area.oldFrom,to:this.area.oldTo}}:undefined;
     const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area),origin);
     const section=document.createElement('div');section.className='tc-area-history';card.appendChild(section);
@@ -88,7 +64,6 @@ class ReviewBox extends WidgetType {
       previous.disabled=loading||!history.hasOlder;next.disabled=loading||!history.hasNewer;
       restore.hidden=history.position===0;restore.disabled=loading||history.selected.text===history.entries[0].text;
       cancel.hidden=history.position===0;cancel.disabled=loading;
-      accept.disabled=loading||history.position>0;reject.disabled=loading||history.position>0;
       note.textContent=!history.hasOlder?history.stopReason:'';note.hidden=!note.textContent;
       if(card.isConnected&&current())this.setPreview(view,history.position===0?null:{path:this.path,base:this.base,original:this.text,index:this.index,range:history.currentRange,text:history.selected.text});
       view.requestMeasure();
@@ -117,7 +92,7 @@ class ReviewBox extends WidgetType {
   }
   // Keep buttons keyboard-accessible while preventing editor selection on clicks.
   ignoreEvent(){return true;}
-  get estimatedHeight(){return 132;}
+  get estimatedHeight(){return 88;}
 }
 
 interface AreaChange extends Change {areaIndex:number}
