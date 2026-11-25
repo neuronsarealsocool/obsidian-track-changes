@@ -1,4 +1,5 @@
 import {promises as fs} from 'node:fs';
+import {constants} from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {gzipSync,gunzipSync} from 'node:zlib';
@@ -6,7 +7,7 @@ export interface Revision {schema:1;id:string;docId:string;time:string;path:stri
 export class Archive {
   readonly docs=new Map<string,Revision>(); readonly active=new Map<string,string>();
   private queue:Promise<unknown>=Promise.resolve();
-  constructor(readonly root:string){}
+  constructor(public root:string){}
   static vaultId(vaultPath:string){return createHash('sha256').update(path.resolve(vaultPath).replaceAll('\\','/').toLowerCase()).digest('hex').slice(0,24);}
   private serial<T>(job:()=>Promise<T>):Promise<T>{const task=this.queue.then(job);this.queue=task.catch(()=>{});return task;}
   async init(){
@@ -47,4 +48,44 @@ export class Archive {
     });
   }
   async idle(){await this.queue;}
+  /** Keep writers queued until all immutable revisions are copied and verified.
+   * Never delete the old archive or overwrite conflicting destination data. */
+  relocate(destination:string,commit:()=>Promise<void>){
+    return this.serial(async()=>{
+      const source=path.resolve(this.root),target=path.resolve(destination);
+      const nested=(parent:string,child:string)=>{const relative=path.relative(parent,child);return relative===''||(!relative.startsWith(`..${path.sep}`)&&relative!=='..'&&!path.isAbsolute(relative));};
+      if(source!==target&&(nested(source,target)||nested(target,source)))throw Error('Choose a history folder outside the current vault archive.');
+      await fs.mkdir(target,{recursive:true});
+      const [sourceReal,targetReal]=await Promise.all([fs.realpath(source),fs.realpath(target)]);
+      if(sourceReal===targetReal){await commit();return;}
+      if(nested(sourceReal,targetReal)||nested(targetReal,sourceReal))throw Error('Choose a history folder outside the current vault archive.');
+      const inventory=async(root:string)=>{
+        const files:string[]=[];
+        for(const doc of await fs.readdir(root,{withFileTypes:true})){
+          if(!doc.isDirectory()||!/^[a-f0-9-]{36}$/.test(doc.name))throw Error(`Unexpected archive entry: ${doc.name}. Existing files were preserved.`);
+          for(const file of await fs.readdir(path.join(root,doc.name),{withFileTypes:true})){
+            if(file.isFile()&&file.name.endsWith('.tmp'))continue;
+            if(!file.isFile()||!/^\d+-[a-f0-9-]+\.json\.gz$/.test(file.name))throw Error('Unexpected archive file. Existing files were preserved.');
+            files.push(path.join(doc.name,file.name));
+          }
+        }
+        return files;
+      };
+      const files=await inventory(source),expected=new Set(files);
+      for(const file of await inventory(target)){
+        if(!expected.has(file)||(await fs.readFile(path.join(source,file))).compare(await fs.readFile(path.join(target,file)))!==0)
+          throw Error('The destination contains different history. Choose an empty history folder; nothing was overwritten.');
+      }
+      for(const file of files){
+        const from=path.join(source,file),to=path.join(target,file);
+        await fs.mkdir(path.dirname(to),{recursive:true});
+        try{await fs.copyFile(from,to,constants.COPYFILE_EXCL);}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;}
+        if(!(await fs.readFile(from)).equals(await fs.readFile(to)))throw Error('History verification failed. The original archive is still active.');
+        const handle=await fs.open(to,'r+');try{await handle.sync();}finally{await handle.close();}
+      }
+      const verified=new Archive(target);await verified.init();
+      if(verified.docs.size!==this.docs.size||[...this.docs].some(([id,r])=>verified.docs.get(id)?.id!==r.id))throw Error('The copied archive state does not match. The original archive is still active.');
+      await commit();this.root=target;
+    });
+  }
 }

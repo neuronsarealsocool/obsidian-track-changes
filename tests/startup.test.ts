@@ -6,6 +6,7 @@ import path from 'node:path';
 import {buildSync} from 'esbuild';
 
 function fixture(){
+  const commands=new Map<string,any>();let saved:any={};
   const timers=new Map<number,()=>void>();let nextTimer=0,layoutReady=()=>{};
   const notices:string[]=[];let initialized=0,registered=0,refreshed=0,dispatched=0;
   let finishInit:()=>void=()=>{};
@@ -18,8 +19,8 @@ function fixture(){
   class Plugin{
     app={vault:{adapter:new FileSystemAdapter(),on:()=>({}),getMarkdownFiles:()=>[]},workspace:{
       onLayoutReady:(callback:()=>void)=>{layoutReady=callback;},on:()=>({}),getLeavesOfType:(type:string)=>type==='markdown'?markdown:leaves}};
-    async loadData(){return {};}
-    registerView(){registered++;}addSettingTab(){}addRibbonIcon(){}addCommand(){}addStatusBarItem(){return status;}
+    async loadData(){return saved;}async saveData(data:any){saved=structuredClone(data);}
+    registerView(){registered++;}addSettingTab(){}addRibbonIcon(){}addCommand(command:any){commands.set(command.id,command);}addStatusBarItem(){return status;}
     registerEvent(){}registerEditorExtension(){}registerInterval(){}registerDomEvent(){}
   }
   const obsidian={Plugin,FileSystemAdapter,ItemView:class{},Modal:class{},PluginSettingTab:class{},Notice:class{constructor(text:string){notices.push(text);}}};
@@ -30,7 +31,7 @@ function fixture(){
     setTimeout,clearTimeout,Symbol,Map});
   const instance=new module.exports.default();
   const start=async()=>{await instance.onload();instance.archive=archive;};
-  return {instance,start,timers,layoutReady:()=>layoutReady(),finishInit,notices,counts:()=>({initialized,registered,refreshed,dispatched})};
+  return {instance,start,timers,commands,saved:()=>saved,layoutReady:()=>layoutReady(),finishInit,notices,counts:()=>({initialized,registered,refreshed,dispatched})};
 }
 
 test('restored deferred sidebar and Markdown views do not throw while refreshing',()=>{
@@ -57,4 +58,19 @@ test('unloading during archive initialization waits for initialization without r
   const f=fixture();await f.start();f.layoutReady();f.timers.values().next().value!();await Promise.resolve();
   f.instance.onunload();f.finishInit();await f.instance.startup;
   assert.equal(f.instance.ready,false);assert.equal(f.counts().refreshed,0);
+});
+
+test('palette command toggles and persists red deletions without disabling revision markers',async()=>{
+  const f=fixture();await f.start();const command=f.commands.get('toggle-red-deletions');
+  assert.equal(command.name,'Toggle red for deletions');assert.equal(f.instance.settings.redDeletions,false);
+  command.callback();await f.instance.settingsQueue;
+  assert.equal(f.instance.settings.redDeletions,true);assert.equal(f.saved().redDeletions,true);assert.equal(f.instance.settings.highlights,true);
+  command.callback();await f.instance.settingsQueue;
+  assert.equal(f.instance.settings.redDeletions,false);assert.equal(f.saved().redDeletions,false);
+});
+
+test('concurrent appearance and folder settings updates preserve both values',async()=>{
+  const f=fixture();await f.start();
+  await Promise.all([f.instance.setRedDeletions(true),f.instance.updateSettings({archiveDirectory:'D:\\History'})]);
+  assert.equal(f.saved().redDeletions,true);assert.equal(f.saved().archiveDirectory,'D:\\History');
 });

@@ -15,12 +15,14 @@ const VIEW='track-changes-review';
 // module reloads so the next instance scans only after the old writer finishes.
 const handoffKey=Symbol.for('obsidian-track-changes.archive-handoffs');
 const handoffs:Map<string,Promise<unknown>>=(globalThis as any)[handoffKey]??=((new Map<string,Promise<unknown>>()));
-interface Settings {archiveDirectory:string;highlights:boolean;saveDelayMs:number}
+interface Settings {archiveDirectory:string;highlights:boolean;redDeletions:boolean;saveDelayMs:number}
 interface Pending {content:string;first:number;last:number}
 export default class TrackChanges extends Plugin {
-  settings:Settings={archiveDirectory:path.join(os.homedir(),'Obsidian Track Changes History'),highlights:true,saveDelayMs:800};
+  settings:Settings={archiveDirectory:path.join(os.homedir(),'Obsidian Track Changes History'),highlights:true,redDeletions:false,saveDelayMs:800};
   archive!:Archive; ready=false; pending=new Map<string,Pending>();lastError='';private lastNotice=0;private stopped=false;
   private startupTimer?:number;private startup?:Promise<void>;
+  private changingDirectory=false;
+  private settingsQueue:Promise<unknown>=Promise.resolve();
   async onload(){
     this.settings={...this.settings,...await this.loadData()};
     this.settings.saveDelayMs=Math.max(200,Math.min(5000,Number(this.settings.saveDelayMs)||800));
@@ -32,7 +34,8 @@ export default class TrackChanges extends Plugin {
     this.addRibbonIcon('history','Track Changes: browse revision history',()=>void this.openReview());
     this.addCommand({id:'review',name:'Browse revision history',callback:()=>void this.openReview()});
     this.addCommand({id:'checkpoint',name:'Save a named checkpoint',editorCallback:(editor,view)=>{if(view.file)new NameModal(this.app,'Name this checkpoint',label=>this.capture(view.file!.path,editor.getValue(),'checkpoint',{label})).open();}});
-    this.addCommand({id:'toggle-highlights',name:'Toggle inline revision markers',callback:()=>{this.settings.highlights=!this.settings.highlights;void this.saveData(this.settings);this.refreshEditors();new Notice(`Track Changes revision markers ${this.settings.highlights?'on':'off'}`);}});
+    this.addCommand({id:'toggle-highlights',name:'Toggle inline revision markers',callback:()=>void this.updateSettings({highlights:!this.settings.highlights}).then(()=>{this.refreshEditors();new Notice(`Track Changes revision markers ${this.settings.highlights?'on':'off'}`);}).catch(error=>new Notice(String(error),9000))});
+    this.addCommand({id:'toggle-red-deletions',name:'Toggle red for deletions',callback:()=>void this.setRedDeletions(!this.settings.redDeletions).then(()=>new Notice(`Red deletions ${this.settings.redDeletions?'on':'off'}`)).catch(error=>new Notice(String(error),9000))});
     const status=this.addStatusBarItem();status.setText('Track Changes: loading');
     // Restored sidebar leaves may still be DeferredViews during startup.
     // Let Obsidian finish its layout before scanning an existing archive.
@@ -75,6 +78,30 @@ export default class TrackChanges extends Plugin {
   async flushPath(notePath:string){const item=this.pending.get(notePath);if(!item)return;this.pending.delete(notePath);try{await this.capture(notePath,item.content);}catch{if(!this.pending.has(notePath))this.pending.set(notePath,item);}}
   async flushDue(){const now=Date.now();for(const [p,item] of this.pending)if(now-item.last>=this.settings.saveDelayMs||now-item.first>=5000)await this.flushPath(p);}
   async flushAll(){for(const p of [...this.pending.keys()])await this.flushPath(p);await this.archive.idle();}
+  private updateSettings(patch:Partial<Settings>){
+    const task=this.settingsQueue.then(async()=>{const settings={...this.settings,...patch};await this.saveData(settings);this.settings=settings;});
+    this.settingsQueue=task.catch(()=>{});return task;
+  }
+  async setRedDeletions(value:boolean){
+    await this.updateSettings({redDeletions:value});this.refreshEditors();this.refreshViews();
+  }
+  async updateMarkerSetting(value:boolean){await this.updateSettings({highlights:value});this.refreshEditors();}
+  async changeHistoryDirectory(value:string){
+    const directory=value.trim().replace(/^"(.*)"$/,'$1');
+    if(!path.isAbsolute(directory)||!/^([a-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/i.test(directory))throw Error('Enter a full Windows folder path, such as D:\\Backups\\Track Changes or \\\\server\\share\\History.');
+    if(!this.ready||this.stopped)throw Error('Wait for the history archive to be ready.');
+    if(this.changingDirectory)throw Error('A history folder change is already in progress.');
+    this.changingDirectory=true;
+    try{
+      await this.flushAll();if(this.pending.size)throw Error('Some edits could not be saved. Fix the storage error before changing folders.');
+      const target=path.join(directory,Archive.vaultId(this.app.vault.adapter instanceof FileSystemAdapter?this.app.vault.adapter.getBasePath():''));
+      await this.archive.relocate(target,async()=>{
+        if(this.stopped)throw Error('The plugin was unloaded. The original archive is still active.');
+        await this.updateSettings({archiveDirectory:directory});
+      });
+      this.refreshViews();this.refreshEditors();
+    }finally{this.changingDirectory=false;}
+  }
   async seed(){
     for(const file of this.app.vault.getMarkdownFiles()){
       if(this.stopped)return;
@@ -159,7 +186,7 @@ class ReviewView extends ItemView {
   requestRefresh(){if(this.timer||this.disposed)return;this.timer=window.setTimeout(()=>{this.timer=undefined;void this.render();},900);}
   async render(){
     if(this.disposed)return;const gen=++this.generation,p=this.plugin,root=this.contentEl;
-    root.empty();root.addClass('tc-review');root.createEl('h2',{text:'Track Changes'});
+    root.empty();root.addClass('tc-review');root.classList.toggle('tc-red-deletions',p.settings.redDeletions);root.createEl('h2',{text:'Track Changes'});
     if(!p.ready){root.createEl('p',{text:'The history archive is not ready. Check plugin settings or storage permissions.'});return;}
     root.createEl('p',{text:p.lastError?`Storage error: ${p.lastError}`:'Local history · no automatic expiry',cls:p.lastError?'tc-error':'tc-caption'});
     const tools=root.createDiv({cls:'tc-tools'});
@@ -223,10 +250,16 @@ class TrackSettings extends PluginSettingTab {
   constructor(app:App,readonly plugin:TrackChanges){super(app,plugin);}
   display(){const root=this.containerEl,p=this.plugin;root.empty();root.createEl('h2',{text:'Track Changes'});
     root.createEl('p',{text:'History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version.'});
-    new Setting(root).setName('Inline revision markers and history boxes').setDesc('Show struck-through old text and Previous / Next revisions when hovering a changed area.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{p.settings.highlights=value;await p.saveData(p.settings);p.refreshEditors();}));
+    new Setting(root).setName('Inline revision markers and history boxes').setDesc('Show struck-through old text and Previous / Next revisions when hovering a changed area.').addToggle(t=>t.setValue(p.settings.highlights).onChange(async value=>{try{await p.updateMarkerSetting(value);}catch(error){t.setValue(p.settings.highlights);new Notice(String(error),9000);}}));
+    new Setting(root).setName('Red deletions').setDesc('Color struck-through text red. Also available as “Track Changes: Toggle red for deletions” in the command palette.').addToggle(t=>t.setValue(p.settings.redDeletions).onChange(async value=>{try{await p.setRedDeletions(value);}catch(error){t.setValue(p.settings.redDeletions);new Notice(String(error),9000);}}));
     let directory=p.settings.archiveDirectory;
-    new Setting(root).setName('Archive directory').setDesc('Absolute folder outside the vault. A separate subfolder is used for each vault. Changing it requires a plugin reload; move the existing vault history folder yourself to keep continuity.').addText(t=>t.setValue(directory).onChange(value=>{directory=value.trim();})).addButton(b=>b.setButtonText('Save for next reload').onClick(async()=>{if(!path.isAbsolute(directory)){new Notice('Choose an absolute folder path.');return;}p.settings.archiveDirectory=directory;await p.saveData(p.settings);new Notice('Saved. Reload the plugin to use this directory. Existing history has not been moved.');}));
-    root.createEl('p',{text:`Active archive: ${p.archive?.root??'Not initialized'}`,cls:'tc-archive-path'});
+    new Setting(root).setName('History folder').setDesc('Enter any writable Windows folder, for example D:\\Backups\\Track Changes or \\\\server\\share\\History. A separate subfolder is used for each vault. Saving copies and verifies existing history, then switches future saves here. The old copy is retained. No reload is needed.').addText(t=>t.setValue(directory).setPlaceholder('D:\\Backups\\Track Changes').onChange(value=>{directory=value;})).addButton(b=>b.setButtonText('Save history here').onClick(async()=>{
+      b.setDisabled(true);b.setButtonText('Copying and verifying…');
+      try{await p.changeHistoryDirectory(directory);new Notice('History folder updated. Existing history was copied and the old copy was retained.');this.display();}
+      catch(error){new Notice(`History folder was not changed: ${String(error)}`,12000);}
+      finally{b.setDisabled(false);b.setButtonText('Save history here');}
+    }));
+    root.createEl('p',{text:`History saved in: ${p.archive?.root??'Not initialized'}`,cls:'tc-archive-path'});
     root.createEl('p',{text:'Old text is struck through to mark changed areas; current text keeps its normal appearance. Hover an area to browse its revisions. Restoring saves the current text first. Deleted notes remain in Browse all notes. Existing comparison baselines and all archived revisions are preserved.'});
   }
 }

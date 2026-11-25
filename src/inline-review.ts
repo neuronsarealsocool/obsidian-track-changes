@@ -6,7 +6,7 @@ import {ReviewArea,reviewAreas} from './review-areas';
 import {AreaHistory,AreaHistorySource,areaRange,TextRange} from './area-history';
 
 interface ReviewHost {
-  settings:{highlights:boolean};
+  settings:{highlights:boolean;redDeletions?:boolean};
   archive:{get:(path:string)=>{baseline:string;docId:string}|undefined;list:AreaHistorySource['list'];load:AreaHistorySource['load']};
   capture:(path:string,text:string)=>Promise<unknown>;
   schedule:(path:string,text:string)=>void;
@@ -96,7 +96,7 @@ class ReviewBox extends WidgetType {
 }
 
 interface AreaChange extends Change {areaIndex:number}
-interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;hovered:number|null;areas:ReviewArea[];raw:AreaChange[];preview:InPlacePreview|null}
+interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;red:boolean;hovered:number|null;areas:ReviewArea[];raw:AreaChange[];preview:InPlacePreview|null}
 export function reviewExtension(host:ReviewHost){
   const reveal=StateEffect.define<number|null>();
   const previewEffect=StateEffect.define<InPlacePreview|null>();
@@ -104,8 +104,8 @@ export function reviewExtension(host:ReviewHost){
   const setPreview:SetPreview=(view,preview)=>{if(!samePreview(view.state.field(field).preview,preview))view.dispatch({effects:previewEffect.of(preview)});};
   function build(state:EditorState,previous?:ReviewState,requested:number|null=null,requestedPreview:InPlacePreview|null=null):ReviewState{
     const path=state.field(editorInfoField,false)?.file?.path,base=path?host.archive.get(path)?.baseline:undefined;
-    const text=state.doc.toString(),enabled=host.settings.highlights;
-    const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled;
+    const text=state.doc.toString(),enabled=host.settings.highlights,red=!!host.settings.redDeletions;
+    const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled&&previous.red===red;
     const areas=unchanged?previous.areas:enabled&&base!==undefined&&text.length+base.length<=150000?reviewAreas(base,text):[];
     const raw=unchanged?previous.raw:areas.flatMap((area,areaIndex)=>changes(area.removed,area.added,true).map(c=>({...c,from:c.from+area.from,to:c.to+area.from,oldFrom:c.oldFrom+area.oldFrom,oldTo:c.oldTo+area.oldFrom,areaIndex})));
     const hovered=unchanged&&requested!==null&&areas[requested]?requested:null;
@@ -127,12 +127,12 @@ export function reviewExtension(host:ReviewHost){
       }
       if(hovered!==null){const area=areas[hovered],anchor=area.from<area.to?areaRange(text,area).to:area.anchor;ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length,setPreview),block:true,side:1}).range(state.doc.lineAt(anchor).to));}
     }
-    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,hovered,areas,raw,preview};
+    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,red,hovered,areas,raw,preview};
   }
   const field=StateField.define<ReviewState>({create:state=>build(state),update:(value,tr)=>{
     let hovered=value.hovered,preview=value.preview;for(const effect of tr.effects){if(effect.is(reveal))hovered=effect.value;if(effect.is(previewEffect))preview=effect.value;}
     return build(tr.state,value,hovered,preview);
-  },provide:f=>EditorView.decorations.from(f,value=>value.decorations)});
+  },provide:f=>[EditorView.decorations.from(f,value=>value.decorations),EditorView.editorAttributes.from(f,value=>({class:value.red?'tc-red-deletions':''}))]});
   // Block widgets must be provided directly by a state field. Capture events
   // stay in a view plugin so rebuilding decorations never performs async work.
   const capture=ViewPlugin.fromClass(class {

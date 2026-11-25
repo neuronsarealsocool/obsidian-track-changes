@@ -8,6 +8,8 @@
   if(!globalThis.__trackChangesTestDirectory)throw Error('Set __trackChangesTestDirectory to an absolute tests/.runtime directory first');
   const root = require('path').join(globalThis.__trackChangesTestDirectory,`live-${Date.now()}`);
   const instance = new real.constructor(app,real.manifest);
+  let savedSettings;
+  instance.saveData=async settings=>{savedSettings=structuredClone(settings);};
   instance.archive = new real.archive.constructor(root);
   await instance.archive.init();instance.ready=true;
   instance.refreshEditors=()=>{};instance.refreshViews=()=>{};
@@ -63,6 +65,14 @@
     const currentMarker=mount.querySelector('.tc-addition'),oldMarker=mount.querySelector('.tc-deletion');
     assert(getComputedStyle(currentMarker).backgroundColor==='rgba(0, 0, 0, 0)'&&getComputedStyle(currentMarker).textDecorationLine==='none','Current text has no colored fill or addition underline');
     assert(getComputedStyle(oldMarker).backgroundColor==='rgba(0, 0, 0, 0)'&&getComputedStyle(oldMarker).textDecorationLine.includes('line-through'),'Old text retains strikethrough without a colored fill');
+    assert(app.commands.commands['track-changes:toggle-red-deletions']?.name==='Track Changes: Toggle red for deletions','The command palette exposes Toggle red for deletions');
+    const neutralColor=getComputedStyle(oldMarker).color;
+    await instance.setRedDeletions(true);cm.dispatch({});
+    const redMarker=mount.querySelector('.tc-deletion');
+    assert(getComputedStyle(redMarker).color!==neutralColor&&getComputedStyle(redMarker).backgroundColor!=='rgba(0, 0, 0, 0)'&&getComputedStyle(redMarker).textDecorationLine.includes('line-through'),'Red deletion mode colors struck-through text red');
+    assert(getComputedStyle(mount.querySelector('.tc-addition')).backgroundColor==='rgba(0, 0, 0, 0)'&&savedSettings.redDeletions===true,'Red deletion mode persists without coloring additions');
+    await instance.setRedDeletions(false);cm.dispatch({});
+    assert(getComputedStyle(mount.querySelector('.tc-deletion')).color===neutralColor&&cm.state.doc.toString()===edited,'Turning red deletions off restores neutral styling without editing the note');
     assert([...mount.querySelectorAll('.tc-deletion')].some(el=>el.textContent.length>0),'Inline deletion decoration renders');
     assert(Array.from(mount.querySelectorAll('.tc-deletion')).some(el=>el.textContent==='original'),'Deleted words stay whole instead of interleaving character fragments');
     const cards=()=>Array.from(mount.querySelectorAll('.tc-inline-review'));
@@ -165,13 +175,25 @@
     assert(!areaPreview()&&cm.state.doc.toString()===latestText,'A stale detached revision button cannot preview or replace newer text');
     await instance.flushAll();
   } finally {cm?.destroy();mount.remove();}
+  instance.app=app;
+  const sourceRoot=instance.archive.root,folder=require('path').join(globalThis.__trackChangesTestDirectory,`moved history (${Date.now()})`);
+  const sourceDoc=instance.archive.get('fixture.md'),sourceNames=await instance.archive.list(sourceDoc.docId);
+  let invalidRefused=false;try{await instance.changeHistoryDirectory('C:relative-folder');}catch{invalidRefused=true;}
+  assert(invalidRefused&&instance.archive.root===sourceRoot,'A drive-relative history folder is refused without changing the active archive');
+  await instance.changeHistoryDirectory(folder);
+  assert(instance.archive.root===require('path').join(folder,real.archive.constructor.vaultId(app.vault.adapter.getBasePath()))&&savedSettings.archiveDirectory===folder,'History folder saves and switches immediately to the chosen Windows directory');
+  assert(JSON.stringify(await instance.archive.list(sourceDoc.docId))===JSON.stringify(sourceNames),'Changing history folders preserves every existing revision');
+  const reopened=new real.archive.constructor(instance.archive.root);await reopened.init();
+  assert(reopened.get('fixture.md').id===sourceDoc.id&&reopened.get('fixture.md').baseline===sourceDoc.baseline,'The copied history and comparison baseline survive archive restart');
+  await instance.capture('migration-fixture.md','Future history');
+  assert(!require('fs').existsSync(require('path').join(sourceRoot,instance.archive.get('migration-fixture.md').docId))&&require('fs').existsSync(require('path').join(sourceRoot,sourceDoc.docId,sourceNames[0])),'Future saves use the new directory and the original history copy is retained');
   await instance.archive.idle();
   instance.schedule('shutdown-fixture.md','Pending text at unload');
   instance.onunload();
-  const handoff=globalThis[Symbol.for('obsidian-track-changes.archive-handoffs')]?.get(root);
+  const handoff=globalThis[Symbol.for('obsidian-track-changes.archive-handoffs')]?.get(instance.archive.root);
   assert(handoff instanceof Promise,'Reload handoff exposes the final flush promise');
   await handoff;
-  const restarted=new real.archive.constructor(root);await restarted.init();
+  const restarted=new real.archive.constructor(instance.archive.root);await restarted.init();
   assert(restarted.get('shutdown-fixture.md')?.content==='Pending text at unload','Reload handoff preserves pending text before the next scan');
   const result={passed:checked.length,checks:checked,isolatedArchive:root,installedReady:real.ready};
   await require('fs').promises.writeFile(require('path').join(root,'result.json'),JSON.stringify(result,null,2));

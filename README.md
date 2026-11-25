@@ -1,12 +1,12 @@
 # Track Changes for Obsidian
 
-Keep a permanent local revision archive and browse the history of individual changed paragraphs. Old text appears struck through; current text keeps its normal appearance without red/green colors or addition underlines. Hover over changed text to reveal **This area's revisions**. Previous / Next revision preview older and newer text in the same area of the note. Choose Use this revision to keep a displayed version.
+Keep a permanent local revision archive and browse the history of individual changed paragraphs. Old text appears struck through; current text keeps its normal appearance without addition underlines. Deletions are neutral by default, with optional red styling. Hover over changed text to reveal **This area's revisions**. Previous / Next revision preview older and newer text in the same area of the note. Choose Use this revision to keep a displayed version.
 
 ## Features
 
 - Inline revision markers in Markdown Source mode and Live Preview.
 - Hover-only history boxes with Previous revision and Next revision controls. Only one box is shown, and hidden boxes leave no blank space.
-- Struck-through old text marks a changed area. No Accept / Reject workflow or colored diff fills.
+- Struck-through old text marks a changed area, with optional red styling toggled from the command palette. No Accept / Reject workflow.
 - Preview historical text in place while the current saved text remains intact. Cancel, Escape, moving away, or returning to the current revision restores the current display. Use this revision applies only that area and saves the preceding note first.
 - Separate revision areas for separate paragraphs, including multi-paragraph pastes and deletions.
 - Revision sidebar with full-note comparisons, named checkpoints, restoration, and recovery as a copy.
@@ -35,11 +35,15 @@ For a manual installation, create `.obsidian/plugins/track-changes/` inside your
 
 Revision markers are editor decorations: they are never inserted into your Markdown or included in copies of its text. Reading view and published notes show the actual document text. Toggle **Inline revision markers and history boxes** in settings to hide or show both.
 
+Run **Track Changes: Toggle red for deletions** from the command palette to switch struck-through text between neutral and red styling. The **Red deletions** switch in plugin settings controls the same saved preference. Current text remains uncolored. The option also applies to in-place historical previews and full-note comparisons.
+
 Updating to 0.6.0 preserves existing comparison baselines and archived revisions. Old text is compared against that baseline, which is the first captured version for new notes or the previously accepted version for notes reviewed in older releases. Removing Accept / Reject controls does not reset or erase that state.
 
 ## Storage and limits
 
-By default, archives live in `~/Obsidian Track Changes History/<vault-id>/`. Choose a different absolute directory in settings. Reload the plugin after a directory change; move the existing vault-id folder manually if you want to preserve continuity. Moving or renaming the vault itself changes its vault identifier; keep the old archive and migrate its subfolder if necessary.
+By default, archives live in `~/Obsidian Track Changes History/<vault-id>/`. Open **Settings → Track Changes → History folder** to choose any writable absolute Windows directory, such as `D:\Backups\Track Changes` or `\\server\share\History`, then click **Save history here**. The plugin adds a separate `<vault-id>` subfolder and displays the complete active path below the field.
+
+Changing the folder copies and verifies all saved revisions before switching future saves to the new location. It works immediately without reloading. Edits made during copying are queued and saved after the switch; the original archive remains as a retained copy. The old copy is not updated with future edits. If copying, verification, or saving the preference fails, the original location remains active. Different history already at the destination is never overwritten; choose an empty folder in that case. Moving or renaming the vault itself changes its vault identifier; keep the old archive and migrate its subfolder if necessary.
 
 Each revision is a self-contained gzip-compressed JSON file with the full note text, accepted baseline, timestamp, event kind, and note identity. A revision is written to a unique temporary file, flushed, and renamed into place before the in-memory state advances. No automatic pruning is performed. Storage errors are visible in notices and the status bar; the plugin does not silently overwrite older revisions. Corruption is reported, and unreadable files are left in place for recovery.
 
@@ -59,7 +63,7 @@ Area history adjusts boundaries when text before the paragraph is inserted or de
 
 Historical text is shown as a temporary, read-only replacement in the editor, including older continuation lines. It is not written into the note, undo history, or revision archive while browsing. To start editing, cancel the preview first; a typing, paste, cut, or drop attempt also cancels it without applying that first input. Incoming document changes cancel the preview and preserve the new current text. The preview is removed when the review box closes, the highlighted area changes, or the plugin unloads.
 
-The in-place preview uses neutral text while you browse. Strikethrough marks current text that would be removed, selected revision text appears normally, and unchanged text stays neutral. The comparison is temporary; Use this revision applies only the selected revision's text, without the struck-through comparison text.
+The in-place preview uses neutral text by default. Strikethrough marks current text that would be removed, selected revision text appears normally, and unchanged text stays neutral. Enabling red deletions colors only the struck-through text. The comparison is temporary; Use this revision applies only the selected revision's text, without the struck-through comparison text.
 
 If an older rewrite crosses an area's non-whitespace boundaries, or repeated text makes the match ambiguous, browsing stops and explains why. It does not substitute a whole document or another paragraph. The complete snapshot is still available in the sidebar's full-note revision history. Browsing also stops at the point where an inserted area did not yet exist. Hovering a deletion follows the removed text at its insertion point rather than taking the surviving paragraph beside it.
 

@@ -534,10 +534,11 @@ var import_node_os = __toESM(require("node:os"));
 
 // src/storage.ts
 var import_node_fs = require("node:fs");
+var import_node_fs2 = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
 var import_node_crypto = require("node:crypto");
 var import_node_zlib = require("node:zlib");
-var Archive = class {
+var Archive = class _Archive {
   constructor(root) {
     this.root = root;
   }
@@ -617,6 +618,63 @@ var Archive = class {
   }
   async idle() {
     await this.queue;
+  }
+  /** Keep writers queued until all immutable revisions are copied and verified.
+   * Never delete the old archive or overwrite conflicting destination data. */
+  relocate(destination, commit) {
+    return this.serial(async () => {
+      const source = import_node_path.default.resolve(this.root), target = import_node_path.default.resolve(destination);
+      const nested = (parent, child) => {
+        const relative = import_node_path.default.relative(parent, child);
+        return relative === "" || !relative.startsWith(`..${import_node_path.default.sep}`) && relative !== ".." && !import_node_path.default.isAbsolute(relative);
+      };
+      if (source !== target && (nested(source, target) || nested(target, source))) throw Error("Choose a history folder outside the current vault archive.");
+      await import_node_fs.promises.mkdir(target, { recursive: true });
+      const [sourceReal, targetReal] = await Promise.all([import_node_fs.promises.realpath(source), import_node_fs.promises.realpath(target)]);
+      if (sourceReal === targetReal) {
+        await commit();
+        return;
+      }
+      if (nested(sourceReal, targetReal) || nested(targetReal, sourceReal)) throw Error("Choose a history folder outside the current vault archive.");
+      const inventory = async (root) => {
+        const files2 = [];
+        for (const doc of await import_node_fs.promises.readdir(root, { withFileTypes: true })) {
+          if (!doc.isDirectory() || !/^[a-f0-9-]{36}$/.test(doc.name)) throw Error(`Unexpected archive entry: ${doc.name}. Existing files were preserved.`);
+          for (const file of await import_node_fs.promises.readdir(import_node_path.default.join(root, doc.name), { withFileTypes: true })) {
+            if (file.isFile() && file.name.endsWith(".tmp")) continue;
+            if (!file.isFile() || !/^\d+-[a-f0-9-]+\.json\.gz$/.test(file.name)) throw Error("Unexpected archive file. Existing files were preserved.");
+            files2.push(import_node_path.default.join(doc.name, file.name));
+          }
+        }
+        return files2;
+      };
+      const files = await inventory(source), expected = new Set(files);
+      for (const file of await inventory(target)) {
+        if (!expected.has(file) || (await import_node_fs.promises.readFile(import_node_path.default.join(source, file))).compare(await import_node_fs.promises.readFile(import_node_path.default.join(target, file))) !== 0)
+          throw Error("The destination contains different history. Choose an empty history folder; nothing was overwritten.");
+      }
+      for (const file of files) {
+        const from = import_node_path.default.join(source, file), to = import_node_path.default.join(target, file);
+        await import_node_fs.promises.mkdir(import_node_path.default.dirname(to), { recursive: true });
+        try {
+          await import_node_fs.promises.copyFile(from, to, import_node_fs2.constants.COPYFILE_EXCL);
+        } catch (error) {
+          if (error.code !== "EEXIST") throw error;
+        }
+        if (!(await import_node_fs.promises.readFile(from)).equals(await import_node_fs.promises.readFile(to))) throw Error("History verification failed. The original archive is still active.");
+        const handle = await import_node_fs.promises.open(to, "r+");
+        try {
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      }
+      const verified = new _Archive(target);
+      await verified.init();
+      if (verified.docs.size !== this.docs.size || [...this.docs].some(([id, r]) => verified.docs.get(id)?.id !== r.id)) throw Error("The copied archive state does not match. The original archive is still active.");
+      await commit();
+      this.root = target;
+    });
   }
 };
 
@@ -1141,8 +1199,8 @@ function reviewExtension(host) {
   };
   function build(state, previous, requested = null, requestedPreview = null) {
     const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, base = path3 ? host.archive.get(path3)?.baseline : void 0;
-    const text = state.doc.toString(), enabled = host.settings.highlights;
-    const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled;
+    const text = state.doc.toString(), enabled = host.settings.highlights, red = !!host.settings.redDeletions;
+    const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled && previous.red === red;
     const areas = unchanged ? previous.areas : enabled && base !== void 0 && text.length + base.length <= 15e4 ? reviewAreas(base, text) : [];
     const raw = unchanged ? previous.raw : areas.flatMap((area, areaIndex) => changes(area.removed, area.added, true).map((c) => ({ ...c, from: c.from + area.from, to: c.to + area.from, oldFrom: c.oldFrom + area.oldFrom, oldTo: c.oldTo + area.oldFrom, areaIndex })));
     const hovered = unchanged && requested !== null && areas[requested] ? requested : null;
@@ -1167,7 +1225,7 @@ function reviewExtension(host) {
         ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length, setPreview), block: true, side: 1 }).range(state.doc.lineAt(anchor).to));
       }
     }
-    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, hovered, areas, raw, preview };
+    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, red, hovered, areas, raw, preview };
   }
   const field = import_state.StateField.define({ create: (state) => build(state), update: (value, tr) => {
     let hovered = value.hovered, preview = value.preview;
@@ -1176,7 +1234,7 @@ function reviewExtension(host) {
       if (effect.is(previewEffect)) preview = effect.value;
     }
     return build(tr.state, value, hovered, preview);
-  }, provide: (f) => import_view.EditorView.decorations.from(f, (value) => value.decorations) });
+  }, provide: (f) => [import_view.EditorView.decorations.from(f, (value) => value.decorations), import_view.EditorView.editorAttributes.from(f, (value) => ({ class: value.red ? "tc-red-deletions" : "" }))] });
   const capture = import_view.ViewPlugin.fromClass(class {
     constructor(view) {
       this.view = view;
@@ -1313,7 +1371,7 @@ var VIEW = "track-changes-review";
 var handoffKey = Symbol.for("obsidian-track-changes.archive-handoffs");
 var handoffs = globalThis[handoffKey] ??= /* @__PURE__ */ new Map();
 var TrackChanges = class extends import_obsidian2.Plugin {
-  settings = { archiveDirectory: import_node_path2.default.join(import_node_os.default.homedir(), "Obsidian Track Changes History"), highlights: true, saveDelayMs: 800 };
+  settings = { archiveDirectory: import_node_path2.default.join(import_node_os.default.homedir(), "Obsidian Track Changes History"), highlights: true, redDeletions: false, saveDelayMs: 800 };
   archive;
   ready = false;
   pending = /* @__PURE__ */ new Map();
@@ -1322,6 +1380,8 @@ var TrackChanges = class extends import_obsidian2.Plugin {
   stopped = false;
   startupTimer;
   startup;
+  changingDirectory = false;
+  settingsQueue = Promise.resolve();
   async onload() {
     this.settings = { ...this.settings, ...await this.loadData() };
     this.settings.saveDelayMs = Math.max(200, Math.min(5e3, Number(this.settings.saveDelayMs) || 800));
@@ -1335,12 +1395,11 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     this.addCommand({ id: "checkpoint", name: "Save a named checkpoint", editorCallback: (editor, view) => {
       if (view.file) new NameModal(this.app, "Name this checkpoint", (label) => this.capture(view.file.path, editor.getValue(), "checkpoint", { label })).open();
     } });
-    this.addCommand({ id: "toggle-highlights", name: "Toggle inline revision markers", callback: () => {
-      this.settings.highlights = !this.settings.highlights;
-      void this.saveData(this.settings);
+    this.addCommand({ id: "toggle-highlights", name: "Toggle inline revision markers", callback: () => void this.updateSettings({ highlights: !this.settings.highlights }).then(() => {
       this.refreshEditors();
       new import_obsidian2.Notice(`Track Changes revision markers ${this.settings.highlights ? "on" : "off"}`);
-    } });
+    }).catch((error) => new import_obsidian2.Notice(String(error), 9e3)) });
+    this.addCommand({ id: "toggle-red-deletions", name: "Toggle red for deletions", callback: () => void this.setRedDeletions(!this.settings.redDeletions).then(() => new import_obsidian2.Notice(`Red deletions ${this.settings.redDeletions ? "on" : "off"}`)).catch((error) => new import_obsidian2.Notice(String(error), 9e3)) });
     const status = this.addStatusBarItem();
     status.setText("Track Changes: loading");
     this.app.workspace.onLayoutReady(() => {
@@ -1458,6 +1517,45 @@ var TrackChanges = class extends import_obsidian2.Plugin {
   async flushAll() {
     for (const p of [...this.pending.keys()]) await this.flushPath(p);
     await this.archive.idle();
+  }
+  updateSettings(patch) {
+    const task = this.settingsQueue.then(async () => {
+      const settings = { ...this.settings, ...patch };
+      await this.saveData(settings);
+      this.settings = settings;
+    });
+    this.settingsQueue = task.catch(() => {
+    });
+    return task;
+  }
+  async setRedDeletions(value) {
+    await this.updateSettings({ redDeletions: value });
+    this.refreshEditors();
+    this.refreshViews();
+  }
+  async updateMarkerSetting(value) {
+    await this.updateSettings({ highlights: value });
+    this.refreshEditors();
+  }
+  async changeHistoryDirectory(value) {
+    const directory = value.trim().replace(/^"(.*)"$/, "$1");
+    if (!import_node_path2.default.isAbsolute(directory) || !/^([a-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/i.test(directory)) throw Error("Enter a full Windows folder path, such as D:\\Backups\\Track Changes or \\\\server\\share\\History.");
+    if (!this.ready || this.stopped) throw Error("Wait for the history archive to be ready.");
+    if (this.changingDirectory) throw Error("A history folder change is already in progress.");
+    this.changingDirectory = true;
+    try {
+      await this.flushAll();
+      if (this.pending.size) throw Error("Some edits could not be saved. Fix the storage error before changing folders.");
+      const target = import_node_path2.default.join(directory, Archive.vaultId(this.app.vault.adapter instanceof import_obsidian2.FileSystemAdapter ? this.app.vault.adapter.getBasePath() : ""));
+      await this.archive.relocate(target, async () => {
+        if (this.stopped) throw Error("The plugin was unloaded. The original archive is still active.");
+        await this.updateSettings({ archiveDirectory: directory });
+      });
+      this.refreshViews();
+      this.refreshEditors();
+    } finally {
+      this.changingDirectory = false;
+    }
   }
   async seed() {
     for (const file of this.app.vault.getMarkdownFiles()) {
@@ -1661,6 +1759,7 @@ var ReviewView = class extends import_obsidian2.ItemView {
     const gen = ++this.generation, p = this.plugin, root = this.contentEl;
     root.empty();
     root.addClass("tc-review");
+    root.classList.toggle("tc-red-deletions", p.settings.redDeletions);
     root.createEl("h2", { text: "Track Changes" });
     if (!p.ready) {
       root.createEl("p", { text: "The history archive is not ready. Check plugin settings or storage permissions." });
@@ -1807,23 +1906,39 @@ var TrackSettings = class extends import_obsidian2.PluginSettingTab {
     root.createEl("h2", { text: "Track Changes" });
     root.createEl("p", { text: "History has no age, revision-count, or size limit. It grows until storage is full. Back up this archive separately; history is not an off-device backup. Only Markdown notes are tracked, beginning when this plugin is enabled. Changes made while Obsidian is closed can only be recorded as the next observed version." });
     new import_obsidian2.Setting(root).setName("Inline revision markers and history boxes").setDesc("Show struck-through old text and Previous / Next revisions when hovering a changed area.").addToggle((t) => t.setValue(p.settings.highlights).onChange(async (value) => {
-      p.settings.highlights = value;
-      await p.saveData(p.settings);
-      p.refreshEditors();
+      try {
+        await p.updateMarkerSetting(value);
+      } catch (error) {
+        t.setValue(p.settings.highlights);
+        new import_obsidian2.Notice(String(error), 9e3);
+      }
+    }));
+    new import_obsidian2.Setting(root).setName("Red deletions").setDesc("Color struck-through text red. Also available as \u201CTrack Changes: Toggle red for deletions\u201D in the command palette.").addToggle((t) => t.setValue(p.settings.redDeletions).onChange(async (value) => {
+      try {
+        await p.setRedDeletions(value);
+      } catch (error) {
+        t.setValue(p.settings.redDeletions);
+        new import_obsidian2.Notice(String(error), 9e3);
+      }
     }));
     let directory = p.settings.archiveDirectory;
-    new import_obsidian2.Setting(root).setName("Archive directory").setDesc("Absolute folder outside the vault. A separate subfolder is used for each vault. Changing it requires a plugin reload; move the existing vault history folder yourself to keep continuity.").addText((t) => t.setValue(directory).onChange((value) => {
-      directory = value.trim();
-    })).addButton((b) => b.setButtonText("Save for next reload").onClick(async () => {
-      if (!import_node_path2.default.isAbsolute(directory)) {
-        new import_obsidian2.Notice("Choose an absolute folder path.");
-        return;
+    new import_obsidian2.Setting(root).setName("History folder").setDesc("Enter any writable Windows folder, for example D:\\Backups\\Track Changes or \\\\server\\share\\History. A separate subfolder is used for each vault. Saving copies and verifies existing history, then switches future saves here. The old copy is retained. No reload is needed.").addText((t) => t.setValue(directory).setPlaceholder("D:\\Backups\\Track Changes").onChange((value) => {
+      directory = value;
+    })).addButton((b) => b.setButtonText("Save history here").onClick(async () => {
+      b.setDisabled(true);
+      b.setButtonText("Copying and verifying\u2026");
+      try {
+        await p.changeHistoryDirectory(directory);
+        new import_obsidian2.Notice("History folder updated. Existing history was copied and the old copy was retained.");
+        this.display();
+      } catch (error) {
+        new import_obsidian2.Notice(`History folder was not changed: ${String(error)}`, 12e3);
+      } finally {
+        b.setDisabled(false);
+        b.setButtonText("Save history here");
       }
-      p.settings.archiveDirectory = directory;
-      await p.saveData(p.settings);
-      new import_obsidian2.Notice("Saved. Reload the plugin to use this directory. Existing history has not been moved.");
     }));
-    root.createEl("p", { text: `Active archive: ${p.archive?.root ?? "Not initialized"}`, cls: "tc-archive-path" });
+    root.createEl("p", { text: `History saved in: ${p.archive?.root ?? "Not initialized"}`, cls: "tc-archive-path" });
     root.createEl("p", { text: "Old text is struck through to mark changed areas; current text keeps its normal appearance. Hover an area to browse its revisions. Restoring saves the current text first. Deleted notes remain in Browse all notes. Existing comparison baselines and all archived revisions are preserved." });
   }
 };
