@@ -7,6 +7,7 @@
 .tc-deletion,.tc-diff del {background:none;text-decoration:line-through;color:var(--text-muted);}
 .tc-red-deletions .tc-deletion,.tc-red-deletions .tc-diff del {color:var(--color-red);background:rgba(var(--color-red-rgb),.13);}
 .tc-deletion {white-space:pre-wrap;user-select:none;}
+.tc-area-history-marker {color:var(--text-muted);user-select:none;}
 .tc-history,.tc-note-list {display:flex;flex-direction:column;gap:var(--size-4-1);max-height:320px;overflow-y:auto;margin-top:var(--size-4-2);}
 .tc-history button,.tc-note-list button {text-align:left;white-space:normal;height:auto;min-height:30px;justify-content:flex-start;}
 .tc-diff {white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-text);padding:var(--size-4-3);background:var(--background-secondary);border-radius:var(--radius-m);}

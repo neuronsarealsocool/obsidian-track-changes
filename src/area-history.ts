@@ -1,6 +1,6 @@
 import {changes} from './changes';
 import {ReviewArea} from './review-areas';
-import {Revision} from './storage';
+import type {Revision,AreaTransition} from './storage';
 import {paragraphs} from './paragraphs';
 
 export interface TextRange {from:number;to:number}
@@ -9,7 +9,7 @@ export interface AreaVersion {text:string;time?:string;id?:string;label?:string;
 export interface AreaHistorySource {
   get:(path:string)=>{docId:string}|undefined;
   list:(docId:string)=>Promise<string[]>;
-  load:(docId:string,name:string)=>Promise<Pick<Revision,'id'|'content'|'time'|'label'|'kind'>>;
+  load:(docId:string,name:string)=>Promise<Pick<Revision,'id'|'content'|'time'|'label'|'kind'|'areaRestore'|'areaChanges'>>;
 }
 export function areaRange(text:string,area:ReviewArea):TextRange{
   if(area.paragraphFrom!==undefined&&area.paragraphTo!==undefined&&area.paragraphFrom>=0&&area.paragraphTo>=area.paragraphFrom&&area.paragraphTo<=text.length)return {from:area.paragraphFrom,to:area.paragraphTo};
@@ -78,7 +78,8 @@ export class AreaHistory {
   private document:string;private range:TextRange;private names?:string[];private cursor=0;
   private readonly docId?:string;
   private deletionOrigin?:AreaOrigin;
-  constructor(readonly source:AreaHistorySource,path:string,text:string,readonly currentRange:TextRange,origin?:AreaOrigin){
+  private restored?:AreaTransition;
+  constructor(readonly source:AreaHistorySource,path:string,text:string,readonly currentRange:TextRange,origin?:AreaOrigin,private areaId?:string){
     this.docId=source.get(path)?.docId;this.document=text;this.range={...currentRange};
     if(currentRange.from===currentRange.to&&origin)this.deletionOrigin=origin;
     this.entries=[{text:text.slice(currentRange.from,currentRange.to),kind:'current'}];
@@ -96,16 +97,27 @@ export class AreaHistory {
       if(!keepReading())return this.selected;
       const revision=await this.source.load(this.docId,this.names[this.cursor]);this.cursor++;
       if(!keepReading())return this.selected;
-      if(revision.content===this.document)continue;
-      const mapped=mapAreaRange(this.deletionOrigin?.document??this.document,revision.content,this.deletionOrigin?.range??this.range);
+      // Explicit restores provide exact boundaries across the saved transition,
+      // even when an area was removed or restored to its original wording.
+      const restoration=this.restored;
+      const transition=()=>[...(revision.areaRestore?[revision.areaRestore]:[]),...(revision.areaChanges??[])].find(area=>(!this.areaId||area.id===this.areaId)&&area.after.from===this.range.from&&area.after.to===this.range.to);
+      if(restoration&&revision.id!==restoration.beforeRevisionId)continue;
+      if(revision.content===this.document&&!restoration){
+        this.restored=transition();
+        continue;
+      }
+      const mapped=restoration?{range:restoration.before}:mapAreaRange(this.deletionOrigin?.document??this.document,revision.content,this.deletionOrigin?.range??this.range);
+      this.restored=undefined;
       if(!mapped.range){this.finished=true;this.stopReason=mapped.reason!;return this.selected;}
+      if(mapped.range.to>revision.content.length){this.finished=true;this.stopReason='The saved restoration boundary is invalid. Use full-note history to compare it.';return this.selected;}
       if(this.deletionOrigin&&mapped.range.from===mapped.range.to)continue;
       this.deletionOrigin=undefined;
       this.document=revision.content;this.range=mapped.range;
+      this.restored=transition();
       const text=revision.content.slice(this.range.from,this.range.to);
       if(text===this.entries.at(-1)!.text)continue;
       this.entries.push({text,time:revision.time,id:revision.id,label:revision.label,kind:revision.kind});this.position++;
-      if(this.range.from===this.range.to){this.finished=true;this.stopReason='This area was not present in earlier saved versions.';}
+      if(this.range.from===this.range.to&&!this.restored){this.finished=true;this.stopReason='This area was not present in earlier saved versions.';}
       else if(this.cursor===this.names.length){this.finished=true;this.stopReason='No earlier revisions of this area.';}
       return this.selected;
     }

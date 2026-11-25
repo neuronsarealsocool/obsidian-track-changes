@@ -538,6 +538,227 @@ var import_node_fs2 = require("node:fs");
 var import_node_path = __toESM(require("node:path"));
 var import_node_crypto = require("node:crypto");
 var import_node_zlib = require("node:zlib");
+
+// src/changes.ts
+function changes(base, current, wholeWords = false) {
+  let oldPos = 0, pos = 0;
+  const out = [];
+  let pending;
+  const parts = base.length + current.length > 4e5 ? null : (wholeWords ? diffWordsWithSpace : diffChars)(base, current, { timeout: 150 });
+  if (!parts) return base === current ? [] : [{ from: 0, to: current.length, oldFrom: 0, oldTo: base.length, removed: base, added: current }];
+  for (const part of parts) {
+    if (!part.added && !part.removed) {
+      if (pending) {
+        out.push(pending);
+        pending = void 0;
+      }
+      pos += part.value.length;
+      oldPos += part.value.length;
+      continue;
+    }
+    pending ??= { from: pos, to: pos, oldFrom: oldPos, oldTo: oldPos, removed: "", added: "" };
+    if (part.removed) {
+      pending.removed += part.value;
+      oldPos += part.value.length;
+      pending.oldTo = oldPos;
+    }
+    if (part.added) {
+      pending.added += part.value;
+      pos += part.value.length;
+      pending.to = pos;
+    }
+  }
+  if (pending) out.push(pending);
+  return out;
+}
+function acceptOne(base, change) {
+  return base.slice(0, change.oldFrom) + change.added + base.slice(change.oldTo);
+}
+function rejectOne(current, change) {
+  return current.slice(0, change.from) + change.removed + current.slice(change.to);
+}
+
+// src/paragraphs.ts
+function paragraphs(text) {
+  const result = [];
+  let from = 0, match;
+  const separators = /\r?\n[\t ]*\r?\n(?:[\t ]*\r?\n)*/g;
+  while (match = separators.exec(text)) {
+    const to = match.index + match[0].length;
+    result.push({ from, bodyTo: match.index, to, body: text.slice(from, match.index), separator: match[0], text: text.slice(from, to) });
+    from = to;
+  }
+  if (from < text.length) result.push({ from, bodyTo: text.length, to: text.length, body: text.slice(from), separator: "", text: text.slice(from) });
+  return result;
+}
+
+// src/area-history.ts
+function areaRange(text, area) {
+  if (area.paragraphFrom !== void 0 && area.paragraphTo !== void 0 && area.paragraphFrom >= 0 && area.paragraphTo >= area.paragraphFrom && area.paragraphTo <= text.length) return { from: area.paragraphFrom, to: area.paragraphTo };
+  if (area.from === area.to) return { from: area.from, to: area.to };
+  let from = 0;
+  const separators = /\r?\n[\t ]*\r?\n/g;
+  let match;
+  while ((match = separators.exec(text)) && match.index + match[0].length <= area.from) from = match.index + match[0].length;
+  let to = area.anchor;
+  separators.lastIndex = 0;
+  while (match = separators.exec(text)) if (match.index < to && to <= match.index + match[0].length) {
+    to = match.index;
+    break;
+  }
+  return from <= to ? { from, to } : { from: area.from, to: area.to };
+}
+function mapAreaRange(newer, older, range) {
+  if (range.from < 0 || range.to < range.from || range.to > newer.length) throw Error("Invalid area range");
+  const edits = changes(newer, older, true);
+  for (const c of edits) {
+    const crossesStart = c.oldFrom < range.from && c.oldTo > range.from && newer.slice(c.oldFrom, range.from).trim() !== "";
+    const crossesEnd = c.oldFrom < range.to && c.oldTo > range.to && newer.slice(range.to, c.oldTo).trim() !== "";
+    if ((crossesStart || crossesEnd) && c.added.trim() !== "") return { reason: "An earlier rewrite also changed surrounding text. Its area cannot be isolated safely." };
+  }
+  function position(offset, side) {
+    let delta = 0;
+    for (const c of edits) {
+      if (offset < c.oldFrom) break;
+      if (c.oldFrom === c.oldTo && offset === c.oldFrom) return side > 0 ? c.to : c.from;
+      if (offset <= c.oldTo) {
+        if (offset === c.oldFrom) return c.from;
+        if (offset === c.oldTo) return c.to;
+        return side > 0 ? c.from : c.to;
+      }
+      delta += c.to - c.from - (c.oldTo - c.oldFrom);
+    }
+    return offset + delta;
+  }
+  let from = position(range.from, 1), to = position(range.to, -1);
+  if (range.from < range.to) {
+    const startsParagraph = range.from === 0 || /\r?\n[\t ]*\r?\n$/.test(newer.slice(0, range.from));
+    const endsParagraph = range.to === newer.length || /^\r?\n[\t ]*\r?\n/.test(newer.slice(range.to));
+    if (startsParagraph && endsParagraph && from < to) {
+      let start = 0, end = older.length, match;
+      const separators = /\r?\n[\t ]*\r?\n/g;
+      while (match = separators.exec(older)) {
+        const after = match.index + match[0].length;
+        if (after <= from) start = after;
+        if (match.index >= to || match.index < to && to <= after) {
+          end = match.index;
+          break;
+        }
+      }
+      from = start;
+      to = end;
+    }
+  }
+  if (range.from === range.to) {
+    const restored = edits.find((c) => c.oldFrom === range.from && c.oldTo === range.to);
+    if (restored) {
+      from = restored.from;
+      to = restored.to;
+    }
+  }
+  if (from > to) return { reason: "The older area boundary is ambiguous." };
+  const currentText = newer.slice(range.from, range.to), oldText = older.slice(from, to);
+  if (paragraphs(currentText).filter((p) => p.body.trim()).length <= 1 && range.from < range.to && paragraphs(oldText).filter((p) => p.body.trim()).length > 1) return { reason: "This earlier version split or joined the paragraph. Its text cannot be isolated safely." };
+  const overlaps = edits.some((c) => c.oldFrom < range.to && c.oldTo > range.from);
+  const repeated = (document2, value) => !!value && document2.indexOf(value) !== document2.lastIndexOf(value);
+  if (overlaps && oldText && (repeated(newer, currentText) || repeated(older, oldText))) return { reason: "Repeated text makes this earlier area ambiguous. Use the full-note history to compare it." };
+  return { range: { from, to } };
+}
+var AreaHistory = class {
+  constructor(source, path3, text, currentRange, origin, areaId) {
+    this.source = source;
+    this.currentRange = currentRange;
+    this.areaId = areaId;
+    this.docId = source.get(path3)?.docId;
+    this.document = text;
+    this.range = { ...currentRange };
+    if (currentRange.from === currentRange.to && origin) this.deletionOrigin = origin;
+    this.entries = [{ text: text.slice(currentRange.from, currentRange.to), kind: "current" }];
+    if (!this.docId) {
+      this.finished = true;
+      this.stopReason = "No saved revisions for this area yet.";
+    }
+  }
+  entries;
+  position = 0;
+  finished = false;
+  stopReason = "";
+  document;
+  range;
+  names;
+  cursor = 0;
+  docId;
+  deletionOrigin;
+  restored;
+  get selected() {
+    return this.entries[this.position];
+  }
+  get hasNewer() {
+    return this.position > 0;
+  }
+  get hasOlder() {
+    return this.position < this.entries.length - 1 || !this.finished;
+  }
+  newer() {
+    if (this.hasNewer) this.position--;
+    return this.selected;
+  }
+  async older(keepReading = () => true) {
+    if (this.position < this.entries.length - 1) {
+      this.position++;
+      return this.selected;
+    }
+    if (this.finished || !this.docId) return this.selected;
+    this.names ??= await this.source.list(this.docId);
+    while (this.cursor < this.names.length) {
+      if (!keepReading()) return this.selected;
+      const revision = await this.source.load(this.docId, this.names[this.cursor]);
+      this.cursor++;
+      if (!keepReading()) return this.selected;
+      const restoration = this.restored;
+      const transition = () => [...revision.areaRestore ? [revision.areaRestore] : [], ...revision.areaChanges ?? []].find((area) => (!this.areaId || area.id === this.areaId) && area.after.from === this.range.from && area.after.to === this.range.to);
+      if (restoration && revision.id !== restoration.beforeRevisionId) continue;
+      if (revision.content === this.document && !restoration) {
+        this.restored = transition();
+        continue;
+      }
+      const mapped = restoration ? { range: restoration.before } : mapAreaRange(this.deletionOrigin?.document ?? this.document, revision.content, this.deletionOrigin?.range ?? this.range);
+      this.restored = void 0;
+      if (!mapped.range) {
+        this.finished = true;
+        this.stopReason = mapped.reason;
+        return this.selected;
+      }
+      if (mapped.range.to > revision.content.length) {
+        this.finished = true;
+        this.stopReason = "The saved restoration boundary is invalid. Use full-note history to compare it.";
+        return this.selected;
+      }
+      if (this.deletionOrigin && mapped.range.from === mapped.range.to) continue;
+      this.deletionOrigin = void 0;
+      this.document = revision.content;
+      this.range = mapped.range;
+      this.restored = transition();
+      const text = revision.content.slice(this.range.from, this.range.to);
+      if (text === this.entries.at(-1).text) continue;
+      this.entries.push({ text, time: revision.time, id: revision.id, label: revision.label, kind: revision.kind });
+      this.position++;
+      if (this.range.from === this.range.to && !this.restored) {
+        this.finished = true;
+        this.stopReason = "This area was not present in earlier saved versions.";
+      } else if (this.cursor === this.names.length) {
+        this.finished = true;
+        this.stopReason = "No earlier revisions of this area.";
+      }
+      return this.selected;
+    }
+    this.finished = true;
+    this.stopReason = "No earlier revisions of this area.";
+    return this.selected;
+  }
+};
+
+// src/storage.ts
 var Archive = class _Archive {
   constructor(root) {
     this.root = root;
@@ -581,6 +802,13 @@ var Archive = class _Archive {
     if (!/^[a-f0-9-]{36}$/.test(docId) || !/^\d+-[a-f0-9-]+\.json\.gz$/.test(name)) throw Error("Invalid revision path");
     const r = JSON.parse((0, import_node_zlib.gunzipSync)(await import_node_fs.promises.readFile(import_node_path.default.join(this.root, docId, name))).toString("utf8"));
     if (r.schema !== 1 || r.docId !== docId || typeof r.content !== "string" || typeof r.baseline !== "string" || typeof r.path !== "string" || !Array.isArray(r.aliases) || typeof r.deleted !== "boolean") throw Error("Invalid revision");
+    const range = (value, limit = Number.MAX_SAFE_INTEGER) => value && Number.isSafeInteger(value.from) && Number.isSafeInteger(value.to) && value.from >= 0 && value.to >= value.from && value.to <= limit;
+    if (r.areaAnchors !== void 0 && (!Array.isArray(r.areaAnchors) || r.areaAnchors.some((area) => !range(area, r.content.length) || typeof area.id !== "string" || typeof area.previousText !== "string"))) throw Error("Invalid area history markers");
+    if (r.areaRestore !== void 0) {
+      const area = r.areaRestore;
+      if (!range(area.before) || !range(area.after, r.content.length) || typeof area.id !== "string" || typeof area.beforeRevisionId !== "string" || typeof area.previousText !== "string") throw Error("Invalid area restoration");
+    }
+    if (r.areaChanges !== void 0 && (!Array.isArray(r.areaChanges) || r.areaChanges.some((area) => !range(area.before) || !range(area.after, r.content.length) || typeof area.id !== "string" || typeof area.beforeRevisionId !== "string"))) throw Error("Invalid area transitions");
     return r;
   }
   async list(docId) {
@@ -598,7 +826,20 @@ var Archive = class _Archive {
       const docId = old?.docId ?? (0, import_node_crypto.randomUUID)();
       const last = old ? Number(old.id.split("-")[0]) : 0;
       const id = `${Math.max(Date.now(), last + 1)}-${(0, import_node_crypto.randomUUID)()}`;
-      const r = { schema: 1, id, docId, time: (/* @__PURE__ */ new Date()).toISOString(), path: notePath, aliases: [.../* @__PURE__ */ new Set([...old?.aliases ?? [], notePath])], kind, content, baseline, deleted: options.deleted ?? false, ...options.label ? { label: options.label } : {} };
+      let areaAnchors = old?.areaAnchors;
+      const areaChanges = [];
+      if (old && old.content !== content && areaAnchors) areaAnchors = areaAnchors.flatMap((area) => {
+        const mapped = mapAreaRange(old.content, content, area);
+        if (!mapped.range) return [];
+        if (area.from === area.to) mapped.range.to = mapped.range.from;
+        areaChanges.push({ id: area.id, before: { from: area.from, to: area.to }, after: mapped.range, beforeRevisionId: old.id });
+        return [{ ...area, ...mapped.range }];
+      });
+      if (options.areaRestore) {
+        const restored = options.areaRestore;
+        areaAnchors = [...(areaAnchors ?? []).filter((area) => area.id !== restored.id), { id: restored.id, ...restored.after, previousText: restored.previousText }];
+      }
+      const r = { schema: 1, id, docId, time: (/* @__PURE__ */ new Date()).toISOString(), path: notePath, aliases: [.../* @__PURE__ */ new Set([...old?.aliases ?? [], notePath])], kind, content, baseline, deleted: options.deleted ?? false, ...options.label ? { label: options.label } : {}, ...areaAnchors ? { areaAnchors } : {}, ...options.areaRestore ? { areaRestore: options.areaRestore } : {}, ...areaChanges.length ? { areaChanges } : {} };
       const dir = import_node_path.default.join(this.root, docId);
       await import_node_fs.promises.mkdir(dir, { recursive: true });
       const destination = import_node_path.default.join(dir, `${id}.json.gz`), tmp = `${destination}.tmp`;
@@ -678,65 +919,28 @@ var Archive = class _Archive {
   }
 };
 
-// src/changes.ts
-function changes(base, current, wholeWords = false) {
-  let oldPos = 0, pos = 0;
-  const out = [];
-  let pending;
-  const parts = base.length + current.length > 4e5 ? null : (wholeWords ? diffWordsWithSpace : diffChars)(base, current, { timeout: 150 });
-  if (!parts) return base === current ? [] : [{ from: 0, to: current.length, oldFrom: 0, oldTo: base.length, removed: base, added: current }];
-  for (const part of parts) {
-    if (!part.added && !part.removed) {
-      if (pending) {
-        out.push(pending);
-        pending = void 0;
-      }
-      pos += part.value.length;
-      oldPos += part.value.length;
-      continue;
-    }
-    pending ??= { from: pos, to: pos, oldFrom: oldPos, oldTo: oldPos, removed: "", added: "" };
-    if (part.removed) {
-      pending.removed += part.value;
-      oldPos += part.value.length;
-      pending.oldTo = oldPos;
-    }
-    if (part.added) {
-      pending.added += part.value;
-      pos += part.value.length;
-      pending.to = pos;
-    }
-  }
-  if (pending) out.push(pending);
-  return out;
-}
-function acceptOne(base, change) {
-  return base.slice(0, change.oldFrom) + change.added + base.slice(change.oldTo);
-}
-function rejectOne(current, change) {
-  return current.slice(0, change.from) + change.removed + current.slice(change.to);
-}
+// src/main.ts
+var import_node_crypto2 = require("node:crypto");
 
 // src/inline-review.ts
 var import_obsidian = require("obsidian");
 var import_state = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 
-// src/paragraphs.ts
-function paragraphs(text) {
-  const result = [];
-  let from = 0, match;
-  const separators = /\r?\n[\t ]*\r?\n(?:[\t ]*\r?\n)*/g;
-  while (match = separators.exec(text)) {
-    const to = match.index + match[0].length;
-    result.push({ from, bodyTo: match.index, to, body: text.slice(from, match.index), separator: match[0], text: text.slice(from, to) });
-    from = to;
-  }
-  if (from < text.length) result.push({ from, bodyTo: text.length, to: text.length, body: text.slice(from), separator: "", text: text.slice(from) });
-  return result;
-}
-
 // src/review-areas.ts
+function historyReviewAreas(base, current, saved = []) {
+  let areas = reviewAreas(base, current);
+  for (const anchor of saved) {
+    if (anchor.from < 0 || anchor.to < anchor.from || anchor.to > current.length) continue;
+    areas = areas.filter((area) => {
+      if (area.historyId) return true;
+      const range = { from: area.paragraphFrom ?? area.from, to: area.paragraphTo ?? area.to };
+      return !(range.from === anchor.from && range.to === anchor.to) && !(range.from < anchor.to && range.to > anchor.from);
+    });
+    areas.push({ from: anchor.from, to: anchor.to, oldFrom: 0, oldTo: anchor.previousText.length, removed: anchor.previousText, added: current.slice(anchor.from, anchor.to), anchor: anchor.to, paragraphFrom: anchor.from, paragraphTo: anchor.to, historyId: anchor.id });
+  }
+  return areas.sort((a, b) => a.from - b.from || a.oldFrom - b.oldFrom);
+}
 function reviewAreas(base, current) {
   const old = paragraphs(base), now = paragraphs(current), pending = [];
   const currentMeta = (p) => ({ paragraphFrom: p.from, paragraphTo: p.bodyTo });
@@ -836,157 +1040,6 @@ function acceptReviewArea(base, current, change) {
   return before + added + after;
 }
 
-// src/area-history.ts
-function areaRange(text, area) {
-  if (area.paragraphFrom !== void 0 && area.paragraphTo !== void 0 && area.paragraphFrom >= 0 && area.paragraphTo >= area.paragraphFrom && area.paragraphTo <= text.length) return { from: area.paragraphFrom, to: area.paragraphTo };
-  if (area.from === area.to) return { from: area.from, to: area.to };
-  let from = 0;
-  const separators = /\r?\n[\t ]*\r?\n/g;
-  let match;
-  while ((match = separators.exec(text)) && match.index + match[0].length <= area.from) from = match.index + match[0].length;
-  let to = area.anchor;
-  separators.lastIndex = 0;
-  while (match = separators.exec(text)) if (match.index < to && to <= match.index + match[0].length) {
-    to = match.index;
-    break;
-  }
-  return from <= to ? { from, to } : { from: area.from, to: area.to };
-}
-function mapAreaRange(newer, older, range) {
-  if (range.from < 0 || range.to < range.from || range.to > newer.length) throw Error("Invalid area range");
-  const edits = changes(newer, older, true);
-  for (const c of edits) {
-    const crossesStart = c.oldFrom < range.from && c.oldTo > range.from && newer.slice(c.oldFrom, range.from).trim() !== "";
-    const crossesEnd = c.oldFrom < range.to && c.oldTo > range.to && newer.slice(range.to, c.oldTo).trim() !== "";
-    if ((crossesStart || crossesEnd) && c.added.trim() !== "") return { reason: "An earlier rewrite also changed surrounding text. Its area cannot be isolated safely." };
-  }
-  function position(offset, side) {
-    let delta = 0;
-    for (const c of edits) {
-      if (offset < c.oldFrom) break;
-      if (c.oldFrom === c.oldTo && offset === c.oldFrom) return side > 0 ? c.to : c.from;
-      if (offset <= c.oldTo) {
-        if (offset === c.oldFrom) return c.from;
-        if (offset === c.oldTo) return c.to;
-        return side > 0 ? c.from : c.to;
-      }
-      delta += c.to - c.from - (c.oldTo - c.oldFrom);
-    }
-    return offset + delta;
-  }
-  let from = position(range.from, 1), to = position(range.to, -1);
-  if (range.from < range.to) {
-    const startsParagraph = range.from === 0 || /\r?\n[\t ]*\r?\n$/.test(newer.slice(0, range.from));
-    const endsParagraph = range.to === newer.length || /^\r?\n[\t ]*\r?\n/.test(newer.slice(range.to));
-    if (startsParagraph && endsParagraph && from < to) {
-      let start = 0, end = older.length, match;
-      const separators = /\r?\n[\t ]*\r?\n/g;
-      while (match = separators.exec(older)) {
-        const after = match.index + match[0].length;
-        if (after <= from) start = after;
-        if (match.index >= to || match.index < to && to <= after) {
-          end = match.index;
-          break;
-        }
-      }
-      from = start;
-      to = end;
-    }
-  }
-  if (range.from === range.to) {
-    const restored = edits.find((c) => c.oldFrom === range.from && c.oldTo === range.to);
-    if (restored) {
-      from = restored.from;
-      to = restored.to;
-    }
-  }
-  if (from > to) return { reason: "The older area boundary is ambiguous." };
-  const currentText = newer.slice(range.from, range.to), oldText = older.slice(from, to);
-  if (paragraphs(currentText).filter((p) => p.body.trim()).length <= 1 && range.from < range.to && paragraphs(oldText).filter((p) => p.body.trim()).length > 1) return { reason: "This earlier version split or joined the paragraph. Its text cannot be isolated safely." };
-  const overlaps = edits.some((c) => c.oldFrom < range.to && c.oldTo > range.from);
-  const repeated = (document2, value) => !!value && document2.indexOf(value) !== document2.lastIndexOf(value);
-  if (overlaps && oldText && (repeated(newer, currentText) || repeated(older, oldText))) return { reason: "Repeated text makes this earlier area ambiguous. Use the full-note history to compare it." };
-  return { range: { from, to } };
-}
-var AreaHistory = class {
-  constructor(source, path3, text, currentRange, origin) {
-    this.source = source;
-    this.currentRange = currentRange;
-    this.docId = source.get(path3)?.docId;
-    this.document = text;
-    this.range = { ...currentRange };
-    if (currentRange.from === currentRange.to && origin) this.deletionOrigin = origin;
-    this.entries = [{ text: text.slice(currentRange.from, currentRange.to), kind: "current" }];
-    if (!this.docId) {
-      this.finished = true;
-      this.stopReason = "No saved revisions for this area yet.";
-    }
-  }
-  entries;
-  position = 0;
-  finished = false;
-  stopReason = "";
-  document;
-  range;
-  names;
-  cursor = 0;
-  docId;
-  deletionOrigin;
-  get selected() {
-    return this.entries[this.position];
-  }
-  get hasNewer() {
-    return this.position > 0;
-  }
-  get hasOlder() {
-    return this.position < this.entries.length - 1 || !this.finished;
-  }
-  newer() {
-    if (this.hasNewer) this.position--;
-    return this.selected;
-  }
-  async older(keepReading = () => true) {
-    if (this.position < this.entries.length - 1) {
-      this.position++;
-      return this.selected;
-    }
-    if (this.finished || !this.docId) return this.selected;
-    this.names ??= await this.source.list(this.docId);
-    while (this.cursor < this.names.length) {
-      if (!keepReading()) return this.selected;
-      const revision = await this.source.load(this.docId, this.names[this.cursor]);
-      this.cursor++;
-      if (!keepReading()) return this.selected;
-      if (revision.content === this.document) continue;
-      const mapped = mapAreaRange(this.deletionOrigin?.document ?? this.document, revision.content, this.deletionOrigin?.range ?? this.range);
-      if (!mapped.range) {
-        this.finished = true;
-        this.stopReason = mapped.reason;
-        return this.selected;
-      }
-      if (this.deletionOrigin && mapped.range.from === mapped.range.to) continue;
-      this.deletionOrigin = void 0;
-      this.document = revision.content;
-      this.range = mapped.range;
-      const text = revision.content.slice(this.range.from, this.range.to);
-      if (text === this.entries.at(-1).text) continue;
-      this.entries.push({ text, time: revision.time, id: revision.id, label: revision.label, kind: revision.kind });
-      this.position++;
-      if (this.range.from === this.range.to) {
-        this.finished = true;
-        this.stopReason = "This area was not present in earlier saved versions.";
-      } else if (this.cursor === this.names.length) {
-        this.finished = true;
-        this.stopReason = "No earlier revisions of this area.";
-      }
-      return this.selected;
-    }
-    this.finished = true;
-    this.stopReason = "No earlier revisions of this area.";
-    return this.selected;
-  }
-};
-
 // src/inline-review.ts
 var HistoricalText = class extends import_view.WidgetType {
   constructor(text, current, index) {
@@ -1058,8 +1111,25 @@ var DeletedText = class extends import_view.WidgetType {
     return span;
   }
 };
+var EmptyAreaHistory = class extends import_view.WidgetType {
+  constructor(areaIndex) {
+    super();
+    this.areaIndex = areaIndex;
+  }
+  eq(other) {
+    return other.areaIndex === this.areaIndex;
+  }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "tc-area-history-marker";
+    span.textContent = "\u21B6";
+    span.dataset.tcArea = String(this.areaIndex);
+    span.setAttribute("aria-label", "Revisions of this empty area");
+    return span;
+  }
+};
 var ReviewBox = class extends import_view.WidgetType {
-  constructor(host, path3, base, text, area, index, total, setPreview) {
+  constructor(host, path3, base, text, area, index, total, setPreview, reopen) {
     super();
     this.host = host;
     this.path = path3;
@@ -1069,6 +1139,7 @@ var ReviewBox = class extends import_view.WidgetType {
     this.index = index;
     this.total = total;
     this.setPreview = setPreview;
+    this.reopen = reopen;
   }
   eq(other) {
     return this.host === other.host && this.path === other.path && this.base === other.base && this.text === other.text && this.index === other.index && this.total === other.total;
@@ -1101,7 +1172,7 @@ var ReviewBox = class extends import_view.WidgetType {
       return button2;
     };
     const origin = this.area.paragraphFrom === void 0 && this.area.from === this.area.to ? { document: this.base, range: { from: this.area.oldFrom, to: this.area.oldTo } } : void 0;
-    const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area), origin);
+    const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area), origin, this.area.historyId);
     const section = document.createElement("div");
     section.className = "tc-area-history";
     card.appendChild(section);
@@ -1163,8 +1234,10 @@ var ReviewBox = class extends import_view.WidgetType {
       card.setAttribute("aria-busy", "true");
       try {
         this.setPreview(view, null);
-        await this.host.restoreAreaVersion(this.path, this.text, this.base, history.currentRange, history.selected.text);
+        const selected = history.selected.text;
+        await this.host.restoreAreaVersion(this.path, this.text, this.base, history.currentRange, selected);
         view.dispatch({});
+        this.reopen(view, { from: history.currentRange.from, to: history.currentRange.from + selected.length });
       } catch (error) {
         new import_obsidian.Notice(String(error), 9e3);
       } finally {
@@ -1197,17 +1270,34 @@ function reviewExtension(host) {
   const setPreview = (view, preview) => {
     if (!samePreview(view.state.field(field).preview, preview)) view.dispatch({ effects: previewEffect.of(preview) });
   };
+  const reopen = (view, range) => {
+    const index = view.state.field(field).areas.findIndex((area) => area.historyId && area.paragraphFrom === range.from && area.paragraphTo === range.to);
+    if (index >= 0) view.dispatch({ effects: reveal.of(index) });
+  };
   function build(state, previous, requested = null, requestedPreview = null) {
-    const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, base = path3 ? host.archive.get(path3)?.baseline : void 0;
+    const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, record = path3 ? host.archive.get(path3) : void 0, base = record?.baseline, saved = record?.areaAnchors;
     const text = state.doc.toString(), enabled = host.settings.highlights, red = !!host.settings.redDeletions;
-    const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled && previous.red === red;
-    const areas = unchanged ? previous.areas : enabled && base !== void 0 && text.length + base.length <= 15e4 ? reviewAreas(base, text) : [];
+    const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled && previous.red === red && previous.saved === saved;
+    const currentSaved = record && record.content !== text ? saved?.flatMap((area) => {
+      const mapped = mapAreaRange(record.content, text, area);
+      if (!mapped.range) return [];
+      if (area.from === area.to) mapped.range.to = mapped.range.from;
+      return [{ ...area, ...mapped.range }];
+    }) : saved;
+    const areas = unchanged ? previous.areas : enabled && base !== void 0 && text.length + base.length <= 15e4 ? historyReviewAreas(base, text, currentSaved) : [];
     const raw = unchanged ? previous.raw : areas.flatMap((area, areaIndex) => changes(area.removed, area.added, true).map((c) => ({ ...c, from: c.from + area.from, to: c.to + area.from, oldFrom: c.oldFrom + area.oldFrom, oldTo: c.oldTo + area.oldFrom, areaIndex })));
-    const hovered = unchanged && requested !== null && areas[requested] ? requested : null;
+    const requestedArea = requested === null ? void 0 : previous?.areas[requested];
+    const refreshedIndex = requestedArea && previous?.text === text && previous.base === base && previous.path === path3 ? areas.findIndex((area) => requestedArea.historyId ? area.historyId === requestedArea.historyId : area.from === requestedArea.from && area.to === requestedArea.to && area.removed === requestedArea.removed) : -1;
+    const hovered = requested !== null && areas[requested] && unchanged ? requested : refreshedIndex >= 0 ? refreshedIndex : null;
     const preview = unchanged && hovered !== null && requestedPreview?.index === hovered && requestedPreview.path === path3 && requestedPreview.original === text && requestedPreview.base === base && requestedPreview.range.from >= 0 && requestedPreview.range.to <= text.length && requestedPreview.range.to >= requestedPreview.range.from ? requestedPreview : null;
     if (unchanged && previous.hovered === hovered && samePreview(previous.preview, preview)) return previous;
     const ranges = [];
     if (path3 && base !== void 0 && areas.length) {
+      areas.forEach((area, index) => {
+        if (!area.historyId || preview?.index === index) return;
+        if (area.to > area.from) ranges.push(import_view.Decoration.mark({ class: "tc-area-target", attributes: { "data-tc-area": String(index) } }).range(area.from, area.to));
+        else if (!area.removed) ranges.push(import_view.Decoration.widget({ widget: new EmptyAreaHistory(index), side: -1 }).range(area.from));
+      });
       for (const c of raw) {
         const areaIndex = c.areaIndex;
         if (preview && areaIndex === preview.index) continue;
@@ -1222,10 +1312,10 @@ function reviewExtension(host) {
       }
       if (hovered !== null) {
         const area = areas[hovered], anchor = area.from < area.to ? areaRange(text, area).to : area.anchor;
-        ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length, setPreview), block: true, side: 1 }).range(state.doc.lineAt(anchor).to));
+        ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length, setPreview, reopen), block: true, side: 1 }).range(state.doc.lineAt(anchor).to));
       }
     }
-    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, red, hovered, areas, raw, preview };
+    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, red, saved, hovered, areas, raw, preview };
   }
   const field = import_state.StateField.define({ create: (state) => build(state), update: (value, tr) => {
     let hovered = value.hovered, preview = value.preview;
@@ -1641,8 +1731,8 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     this.refreshEditors();
     this.refreshViews();
   }
-  async replaceSafely(notePath, expected, next, kind) {
-    await this.capture(notePath, expected, `before-${kind}`);
+  async replaceSafely(notePath, expected, next, kind, areaRestore) {
+    const preceding = await this.capture(notePath, expected, `before-${kind}`);
     const editor = this.editorFor(notePath);
     if (editor) {
       if (editor.getValue() !== expected) throw Error("The note changed. Nothing was replaced.");
@@ -1656,13 +1746,14 @@ var TrackChanges = class extends import_obsidian2.Plugin {
       });
     }
     this.pending.delete(notePath);
-    await this.capture(notePath, next, kind);
+    await this.capture(notePath, next, kind, areaRestore ? { areaRestore: { ...areaRestore, beforeRevisionId: preceding.id } } : {});
   }
   async restoreAreaVersion(notePath, expected, base, range, text) {
     if (this.current(notePath) !== expected || this.archive.get(notePath)?.baseline !== base) throw Error("The note changed while browsing revisions. Open its updated review box.");
     if (range.from < 0 || range.to < range.from || range.to > expected.length) throw Error("Invalid area boundary.");
     const next = expected.slice(0, range.from) + text + expected.slice(range.to);
-    await this.replaceSafely(notePath, expected, next, "restore-area");
+    const existing = this.archive.get(notePath)?.areaAnchors?.find((area) => area.from === range.from && area.to === range.to);
+    await this.replaceSafely(notePath, expected, next, "restore-area", { id: existing?.id ?? (0, import_node_crypto2.randomUUID)(), before: range, after: { from: range.from, to: range.from + text.length }, previousText: expected.slice(range.from, range.to) });
     this.refreshEditors();
     this.refreshViews();
   }

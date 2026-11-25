@@ -1,9 +1,25 @@
 import {diffArrays} from 'diff';
 import {Change,acceptOne,changes} from './changes';
 import {Paragraph,paragraphs} from './paragraphs';
+import type {SavedArea} from './storage';
 
-export interface ReviewArea extends Change {anchor:number;paragraphFrom?:number;paragraphTo?:number;oldParagraphFrom?:number;oldParagraphTo?:number;operation?:'body'|'separator'|'insert'|'delete'}
+export interface ReviewArea extends Change {anchor:number;paragraphFrom?:number;paragraphTo?:number;oldParagraphFrom?:number;oldParagraphTo?:number;historyId?:string;operation?:'body'|'separator'|'insert'|'delete'}
 interface Pending {area:ReviewArea;kind:'body'|'separator'|'insert'|'delete';paragraph?:number}
+
+/** Restored areas remain browseable even if they now match the comparison text. */
+export function historyReviewAreas(base:string,current:string,saved:SavedArea[]=[]):ReviewArea[]{
+  let areas=reviewAreas(base,current);
+  for(const anchor of saved){
+    if(anchor.from<0||anchor.to<anchor.from||anchor.to>current.length)continue;
+    areas=areas.filter(area=>{
+      if(area.historyId)return true;
+      const range={from:area.paragraphFrom??area.from,to:area.paragraphTo??area.to};
+      return !(range.from===anchor.from&&range.to===anchor.to)&&!(range.from<anchor.to&&range.to>anchor.from);
+    });
+    areas.push({from:anchor.from,to:anchor.to,oldFrom:0,oldTo:anchor.previousText.length,removed:anchor.previousText,added:current.slice(anchor.from,anchor.to),anchor:anchor.to,paragraphFrom:anchor.from,paragraphTo:anchor.to,historyId:anchor.id});
+  }
+  return areas.sort((a,b)=>a.from-b.from||a.oldFrom-b.oldFrom);
+}
 
 /** Align paragraphs first. Word diffs cannot cross current paragraph bodies. */
 export function reviewAreas(base:string,current:string):ReviewArea[]{

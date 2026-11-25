@@ -76,7 +76,7 @@
     assert([...mount.querySelectorAll('.tc-deletion')].some(el=>el.textContent.length>0),'Inline deletion decoration renders');
     assert(Array.from(mount.querySelectorAll('.tc-deletion')).some(el=>el.textContent==='original'),'Deleted words stay whole instead of interleaving character fragments');
     const cards=()=>Array.from(mount.querySelectorAll('.tc-inline-review'));
-    const marker=index=>mount.querySelector(`.tc-addition[data-tc-area="${index}"],.tc-deletion[data-tc-area="${index}"],.tc-inplace-preview[data-tc-area="${index}"]`);
+    const marker=index=>mount.querySelector(`.tc-addition[data-tc-area="${index}"],.tc-deletion[data-tc-area="${index}"],.tc-area-target[data-tc-area="${index}"],.tc-area-history-marker[data-tc-area="${index}"],.tc-inplace-preview[data-tc-area="${index}"]`);
     const areaPreview=()=>mount.querySelector('.tc-inplace-text');
     const previewText=()=>{const clone=areaPreview()?.cloneNode(true);clone?.querySelectorAll('.tc-preview-deletion,.tc-preview-empty').forEach(el=>el.remove());return clone?.textContent;};
     const previewCurrentText=()=>{const clone=areaPreview()?.cloneNode(true);clone?.querySelectorAll('.tc-preview-addition,.tc-preview-empty').forEach(el=>el.remove());return clone?.textContent;};
@@ -141,6 +141,22 @@
     const areaDoc=instance.archive.get('inline-fixture.md');
     const areaVersions=await Promise.all((await instance.archive.list(areaDoc.docId)).map(name=>instance.archive.load(areaDoc.docId,name)));
     assert(areaVersions.some(r=>r.kind==='before-restore-area'&&r.content===edited),'An area restoration saves the entire preceding note for recovery');
+    await waitFor(()=>cards().length===1&&cards()[0].querySelector('.tc-area-history-status').textContent==='Current text','Use this revision keeps the restored area’s history box open');
+    action(0,'previous');await waitFor(()=>previewText()==='That is the revised introduction.','A restored original can still browse the newer wording that was replaced');
+    action(0,'previous');await waitFor(()=>previewText()===earlierArea,'Restoring a version does not hide other historical versions');
+    action(0,'previous');await waitFor(()=>previewText()==='That is the original introduction.','The oldest version remains available after restoration');
+    action(0,'next');await waitFor(()=>previewText()===earlierArea,'Next revision still traverses the area after restoration');
+    action(0,'restore-area');await waitFor(()=>cm.state.doc.toString().startsWith(earlierArea)&&cards().length===1&&!areaPreview(),'Another version can be applied without losing the history box');
+    action(0,'previous');await waitFor(()=>previewText()==='That is the original introduction.','After a second restore, the preceding version is still available');
+    action(0,'previous');await waitFor(()=>previewText()==='That is the revised introduction.','After repeated restores, newer historical wording remains available');
+    action(0,'previous');await waitFor(()=>previewText()===earlierArea,'Previously used versions remain distinct historical entries');
+    action(0,'previous');await waitFor(()=>previewText()==='That is the original introduction.','Repeated restores retain the complete earlier area history');
+    action(0,'restore-area');await waitFor(()=>cm.state.doc.toString().startsWith('That is the original introduction.')&&cards().length===1&&!areaPreview(),'The original wording can be applied again while retaining revisions');
+    const afterRestore=cm.state.doc.toString(),reopenedArchive=new real.archive.constructor(instance.archive.root);await reopenedArchive.init();instance.archive=reopenedArchive;
+    cm.destroy();cm=new View({state:State.create({doc:afterRestore,extensions:[editorInfoField.init(()=>({file:{path:'inline-fixture.md'}})),instance.extension()]}),parent:mount});
+    assert(cards().length===0&&!!mount.querySelector('.tc-area-target'),'A restored area retains its hover target after reopening its saved archive and editor');
+    action(0,'previous');await waitFor(()=>previewText()===earlierArea,'Reopening the editor retains access to versions replaced by Use this revision');
+    action(0,'cancel-preview');
     cm.dispatch({changes:{from:0,to:cm.state.doc.length,insert:edited}});await instance.flushAll();
     instance.settings.highlights=false;cm.dispatch({});assert(cards().length===0,'Disabling highlights hides review boxes');
     instance.settings.highlights=true;cm.dispatch({});assert(cards().length===0&&!!marker(0),'Re-enabling highlights keeps boxes hidden until hover');
@@ -158,6 +174,7 @@
     action(0,'restore-area');await waitFor(()=>cm.state.doc.toString()===selectedDeletedText,'Use this revision restores only the selected deleted paragraph');
     assert(!cm.state.doc.toString().includes('A second paragraph')&&!cm.state.doc.toString().includes('The final paragraph'),'Restoring a deleted paragraph leaves its neighbours deleted');
     await instance.flushAll();
+    instance.archive.active.delete('inline-fixture.md'); // A new isolated paste fixture, without the preceding restored-area markers.
     await instance.capture('inline-fixture.md','','accept',{baseline:''});
     const pasted='First pasted paragraph.\n\nSecond pasted paragraph.\n\nThird pasted paragraph.';
     cm.dispatch({changes:{from:0,to:cm.state.doc.length,insert:pasted}});await instance.flushAll();
@@ -169,6 +186,10 @@
     assert(previewCurrentText()==='Second pasted paragraph.'&&cm.state.doc.toString()===pasted,'The middle paragraph preview excludes both neighbours and leaves the note unchanged');
     assert(mount.querySelector('.tc-addition[data-tc-area="0"]')?.textContent.includes('First pasted')&&mount.querySelector('.tc-addition[data-tc-area="2"]')?.textContent.includes('Third pasted'),'Neighbouring paragraphs retain their independent hover targets during a preview');
     action(1,'cancel-preview');
+    action(1,'previous');await waitFor(()=>!!areaPreview()&&previewText()==='','An inserted area can select its earlier absence for restoration');
+    action(1,'restore-area');await waitFor(()=>!cm.state.doc.toString().includes('Second pasted')&&cards().length===1&&!areaPreview(),'Restoring an area to absence keeps its revision controls available');
+    const emptyIndex=Number(cards()[0].dataset.changeIndex);action(emptyIndex,'previous');await waitFor(()=>previewText()==='Second pasted paragraph.','An area restored to empty can still browse its removed version');
+    action(emptyIndex,'restore-area');await waitFor(()=>cm.state.doc.toString().includes('Second pasted paragraph.')&&cards().length===1&&!areaPreview(),'The removed version can be restored again from the same area history');
     hover(1);const detachedPrevious=cards()[0].querySelector('[data-action="previous"]');
     cm.dispatch({changes:{from:cm.state.doc.length,insert:' More detail.'}});
     const latestText=cm.state.doc.toString();detachedPrevious.click();await new Promise(r=>setTimeout(r,30));

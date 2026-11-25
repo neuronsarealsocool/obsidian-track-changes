@@ -3,7 +3,8 @@ import {EditorView} from '@codemirror/view';
 import {diffWordsWithSpace} from 'diff';
 import path from 'node:path';
 import os from 'node:os';
-import {Archive,Revision} from './storage';
+import {Archive,Revision,AreaRestore} from './storage';
+import {randomUUID} from 'node:crypto';
 import {Change,rejectOne} from './changes';
 import {reviewExtension} from './inline-review';
 import {acceptReviewArea} from './review-areas';
@@ -136,18 +137,19 @@ export default class TrackChanges extends Plugin {
     }
     this.refreshEditors();this.refreshViews();
   }
-  async replaceSafely(notePath:string,expected:string,next:string,kind:string){
-    await this.capture(notePath,expected,`before-${kind}`);
+  async replaceSafely(notePath:string,expected:string,next:string,kind:string,areaRestore?:Omit<AreaRestore,'beforeRevisionId'>){
+    const preceding=await this.capture(notePath,expected,`before-${kind}`);
     const editor=this.editorFor(notePath);
     if(editor){if(editor.getValue()!==expected)throw Error('The note changed. Nothing was replaced.');editor.setValue(next);}
     else{const file=this.app.vault.getAbstractFileByPath(notePath);if(!(file instanceof TFile))throw Error('Note no longer exists. Use Recover as copy.');await this.app.vault.process(file,current=>{if(current!==expected)throw Error('The note changed. Nothing was replaced.');return next;});}
-    this.pending.delete(notePath);await this.capture(notePath,next,kind);
+    this.pending.delete(notePath);await this.capture(notePath,next,kind,areaRestore?{areaRestore:{...areaRestore,beforeRevisionId:preceding.id}}:{});
   }
   async restoreAreaVersion(notePath:string,expected:string,base:string,range:TextRange,text:string){
     if(this.current(notePath)!==expected||this.archive.get(notePath)?.baseline!==base)throw Error('The note changed while browsing revisions. Open its updated review box.');
     if(range.from<0||range.to<range.from||range.to>expected.length)throw Error('Invalid area boundary.');
     const next=expected.slice(0,range.from)+text+expected.slice(range.to);
-    await this.replaceSafely(notePath,expected,next,'restore-area');this.refreshEditors();this.refreshViews();
+    const existing=this.archive.get(notePath)?.areaAnchors?.find(area=>area.from===range.from&&area.to===range.to);
+    await this.replaceSafely(notePath,expected,next,'restore-area',{id:existing?.id??randomUUID(),before:range,after:{from:range.from,to:range.from+text.length},previousText:expected.slice(range.from,range.to)});this.refreshEditors();this.refreshViews();
   }
   async repairAcceptedBoundaries(notePath:string){
     await this.flushPath(notePath);

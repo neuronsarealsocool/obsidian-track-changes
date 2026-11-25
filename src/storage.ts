@@ -3,7 +3,11 @@ import {constants} from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {gzipSync,gunzipSync} from 'node:zlib';
-export interface Revision {schema:1;id:string;docId:string;time:string;path:string;aliases:string[];kind:string;content:string;baseline:string;deleted:boolean;label?:string}
+import {mapAreaRange} from './area-history';
+export interface SavedArea {id:string;from:number;to:number;previousText:string}
+export interface AreaRestore {id:string;before:{from:number;to:number};after:{from:number;to:number};beforeRevisionId:string;previousText:string}
+export type AreaTransition=Omit<AreaRestore,'previousText'>;
+export interface Revision {schema:1;id:string;docId:string;time:string;path:string;aliases:string[];kind:string;content:string;baseline:string;deleted:boolean;label?:string;areaAnchors?:SavedArea[];areaRestore?:AreaRestore;areaChanges?:AreaTransition[]}
 export class Archive {
   readonly docs=new Map<string,Revision>(); readonly active=new Map<string,string>();
   private queue:Promise<unknown>=Promise.resolve();
@@ -26,11 +30,15 @@ export class Archive {
     if(!/^[a-f0-9-]{36}$/.test(docId)||!/^\d+-[a-f0-9-]+\.json\.gz$/.test(name))throw Error('Invalid revision path');
     const r=JSON.parse(gunzipSync(await fs.readFile(path.join(this.root,docId,name))).toString('utf8'));
     if(r.schema!==1||r.docId!==docId||typeof r.content!=='string'||typeof r.baseline!=='string'||typeof r.path!=='string'||!Array.isArray(r.aliases)||typeof r.deleted!=='boolean')throw Error('Invalid revision');
+    const range=(value:any,limit=Number.MAX_SAFE_INTEGER)=>value&&Number.isSafeInteger(value.from)&&Number.isSafeInteger(value.to)&&value.from>=0&&value.to>=value.from&&value.to<=limit;
+    if(r.areaAnchors!==undefined&&(!Array.isArray(r.areaAnchors)||r.areaAnchors.some((area:any)=>!range(area,r.content.length)||typeof area.id!=='string'||typeof area.previousText!=='string')))throw Error('Invalid area history markers');
+    if(r.areaRestore!==undefined){const area=r.areaRestore;if(!range(area.before)||!range(area.after,r.content.length)||typeof area.id!=='string'||typeof area.beforeRevisionId!=='string'||typeof area.previousText!=='string')throw Error('Invalid area restoration');}
+    if(r.areaChanges!==undefined&&(!Array.isArray(r.areaChanges)||r.areaChanges.some((area:any)=>!range(area.before)||!range(area.after,r.content.length)||typeof area.id!=='string'||typeof area.beforeRevisionId!=='string')))throw Error('Invalid area transitions');
     return r;
   }
   async list(docId:string){if(!/^[a-f0-9-]{36}$/.test(docId))throw Error('Invalid document');return (await fs.readdir(path.join(this.root,docId))).filter(n=>/^\d+-[a-f0-9-]+\.json\.gz$/.test(n)).sort().reverse();}
   async load(docId:string,name:string){return this.read(docId,name);}
-  save(notePath:string,content:string,kind='edit',options:{baseline?:string;label?:string;docId?:string;deleted?:boolean;oldPath?:string}={}){
+  save(notePath:string,content:string,kind='edit',options:{baseline?:string;label?:string;docId?:string;deleted?:boolean;oldPath?:string;areaRestore?:AreaRestore}={}){
     return this.serial(async()=>{
       const old=options.docId?this.docs.get(options.docId):this.get(options.oldPath??notePath);
       const baseline=options.baseline??old?.baseline??content;
@@ -38,7 +46,19 @@ export class Archive {
       const docId=old?.docId??randomUUID();
       const last=old?Number(old.id.split('-')[0]):0;
       const id=`${Math.max(Date.now(),last+1)}-${randomUUID()}`;
-      const r:Revision={schema:1,id,docId,time:new Date().toISOString(),path:notePath,aliases:[...new Set([...(old?.aliases??[]),notePath])],kind,content,baseline,deleted:options.deleted??false,...(options.label?{label:options.label}:{})};
+      let areaAnchors=old?.areaAnchors;
+      const areaChanges:AreaTransition[]=[];
+      if(old&&old.content!==content&&areaAnchors)areaAnchors=areaAnchors.flatMap(area=>{
+        const mapped=mapAreaRange(old.content,content,area);if(!mapped.range)return [];
+        if(area.from===area.to)mapped.range.to=mapped.range.from;
+        areaChanges.push({id:area.id,before:{from:area.from,to:area.to},after:mapped.range,beforeRevisionId:old.id});
+        return [{...area,...mapped.range}];
+      });
+      if(options.areaRestore){
+        const restored=options.areaRestore;
+        areaAnchors=[...(areaAnchors??[]).filter(area=>area.id!==restored.id),{id:restored.id,...restored.after,previousText:restored.previousText}];
+      }
+      const r:Revision={schema:1,id,docId,time:new Date().toISOString(),path:notePath,aliases:[...new Set([...(old?.aliases??[]),notePath])],kind,content,baseline,deleted:options.deleted??false,...(options.label?{label:options.label}:{}),...(areaAnchors?{areaAnchors}:{}),...(options.areaRestore?{areaRestore:options.areaRestore}:{}),...(areaChanges.length?{areaChanges}:{})};
       const dir=path.join(this.root,docId);await fs.mkdir(dir,{recursive:true});
       const destination=path.join(dir,`${id}.json.gz`),tmp=`${destination}.tmp`;
       const handle=await fs.open(tmp,'wx');try{await handle.writeFile(gzipSync(JSON.stringify(r)));await handle.sync();}finally{await handle.close();}

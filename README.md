@@ -67,7 +67,11 @@ The in-place preview uses neutral text by default. Strikethrough marks current t
 
 If an older rewrite crosses an area's non-whitespace boundaries, or repeated text makes the match ambiguous, browsing stops and explains why. It does not substitute a whole document or another paragraph. The complete snapshot is still available in the sidebar's full-note revision history. Browsing also stops at the point where an inserted area did not yet exist. Hovering a deletion follows the removed text at its insertion point rather than taking the surviving paragraph beside it.
 
-**Use this revision** changes only the area's current boundaries. The rest of the current note, including other pending edits, is preserved. The comparison baseline stays unchanged, so restored text may retain revision markers.
+**Use this revision** changes only the area's current boundaries. The rest of the current note is preserved. The comparison baseline stays unchanged. The area's history box stays available after applying a version: Previous / Next can still browse the replaced text and all other safely isolated saved versions. Applying a version adds history; it never discards or truncates later or earlier versions.
+
+Restored areas retain their own history markers, including when their wording now matches the comparison baseline. Old text from the restoration stays struck through; current text remains hoverable. Empty restored areas keep a struck-through marker, or a small history symbol when there is no old text to display. These markers survive closing and reopening the editor, restarting the plugin, and changing the history folder. Ordinary safe edits before the area move its marker with it. If a later edit joins or splits surrounding paragraphs ambiguously, the full-note snapshots remain available in the sidebar.
+
+New snapshots include optional area marker and transition metadata so browsing can follow exact area boundaries across explicit restores and subsequent edits. Older archive files remain readable without migration. A missing area that resulted from an explicit restore can still be browsed back to its replaced text; reaching the time before an area was first created still ends its earlier history.
 
 ## Development
 

@@ -2,12 +2,13 @@ import {Notice,editorInfoField} from 'obsidian';
 import {EditorState,Range,StateEffect,StateField} from '@codemirror/state';
 import {Decoration,DecorationSet,EditorView,ViewPlugin,ViewUpdate,WidgetType} from '@codemirror/view';
 import {Change,changes} from './changes';
-import {ReviewArea,reviewAreas} from './review-areas';
-import {AreaHistory,AreaHistorySource,areaRange,TextRange} from './area-history';
+import {ReviewArea,historyReviewAreas} from './review-areas';
+import type {SavedArea} from './storage';
+import {AreaHistory,AreaHistorySource,areaRange,mapAreaRange,TextRange} from './area-history';
 
 interface ReviewHost {
   settings:{highlights:boolean;redDeletions?:boolean};
-  archive:{get:(path:string)=>{baseline:string;docId:string}|undefined;list:AreaHistorySource['list'];load:AreaHistorySource['load']};
+  archive:{get:(path:string)=>{baseline:string;docId:string;content:string;areaAnchors?:SavedArea[]}|undefined;list:AreaHistorySource['list'];load:AreaHistorySource['load']};
   capture:(path:string,text:string)=>Promise<unknown>;
   schedule:(path:string,text:string)=>void;
   restoreAreaVersion:(path:string,expected:string,base:string,range:TextRange,text:string)=>Promise<void>;
@@ -39,8 +40,13 @@ class DeletedText extends WidgetType {
   eq(other:DeletedText){return other.text===this.text&&other.areaIndex===this.areaIndex;}
   toDOM(){const span=document.createElement('span');span.className='tc-deletion';span.textContent=this.text;span.dataset.tcArea=String(this.areaIndex);span.setAttribute('aria-label',`Deleted: ${this.text}`);return span;}
 }
+class EmptyAreaHistory extends WidgetType {
+  constructor(readonly areaIndex:number){super();}
+  eq(other:EmptyAreaHistory){return other.areaIndex===this.areaIndex;}
+  toDOM(){const span=document.createElement('span');span.className='tc-area-history-marker';span.textContent='↶';span.dataset.tcArea=String(this.areaIndex);span.setAttribute('aria-label','Revisions of this empty area');return span;}
+}
 class ReviewBox extends WidgetType {
-  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number,readonly setPreview:SetPreview){super();}
+  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number,readonly setPreview:SetPreview,readonly reopen:(view:EditorView,range:TextRange)=>void){super();}
   eq(other:ReviewBox){return this.host===other.host&&this.path===other.path&&this.base===other.base&&this.text===other.text&&this.index===other.index&&this.total===other.total;}
   toDOM(view:EditorView){
     const wrapper=document.createElement('div');wrapper.className='tc-inline-container';wrapper.contentEditable='false';wrapper.dataset.tcArea=String(this.index);
@@ -51,7 +57,7 @@ class ReviewBox extends WidgetType {
       button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();void run();});parent.appendChild(button);return button;
     };
     const origin=this.area.paragraphFrom===undefined&&this.area.from===this.area.to?{document:this.base,range:{from:this.area.oldFrom,to:this.area.oldTo}}:undefined;
-    const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area),origin);
+    const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area),origin,this.area.historyId);
     const section=document.createElement('div');section.className='tc-area-history';card.appendChild(section);
     const historyTitle=document.createElement('div');historyTitle.className='tc-area-history-title';historyTitle.textContent='This area’s revisions';section.appendChild(historyTitle);
     const status=document.createElement('div');status.className='tc-area-history-status';status.setAttribute('aria-live','polite');section.appendChild(status);
@@ -79,7 +85,7 @@ class ReviewBox extends WidgetType {
       if(loading||history.position===0)return;
       if(!current()){view.dispatch({});return;}
       const enabled=Array.from(card.querySelectorAll<HTMLButtonElement>('button')).filter(b=>!b.disabled);enabled.forEach(b=>b.disabled=true);card.setAttribute('aria-busy','true');
-      try{this.setPreview(view,null);await this.host.restoreAreaVersion(this.path,this.text,this.base,history.currentRange,history.selected.text);view.dispatch({});}
+      try{this.setPreview(view,null);const selected=history.selected.text;await this.host.restoreAreaVersion(this.path,this.text,this.base,history.currentRange,selected);view.dispatch({});this.reopen(view,{from:history.currentRange.from,to:history.currentRange.from+selected.length});}
       catch(error){new Notice(String(error),9000);}
       finally{card.removeAttribute('aria-busy');enabled.forEach(b=>b.disabled=false);}
     };
@@ -96,23 +102,32 @@ class ReviewBox extends WidgetType {
 }
 
 interface AreaChange extends Change {areaIndex:number}
-interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;red:boolean;hovered:number|null;areas:ReviewArea[];raw:AreaChange[];preview:InPlacePreview|null}
+interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;red:boolean;saved?:SavedArea[];hovered:number|null;areas:ReviewArea[];raw:AreaChange[];preview:InPlacePreview|null}
 export function reviewExtension(host:ReviewHost){
   const reveal=StateEffect.define<number|null>();
   const previewEffect=StateEffect.define<InPlacePreview|null>();
   const samePreview=(a:InPlacePreview|null,b:InPlacePreview|null)=>a===b||!!a&&!!b&&a.path===b.path&&a.base===b.base&&a.original===b.original&&a.index===b.index&&a.range.from===b.range.from&&a.range.to===b.range.to&&a.text===b.text;
   const setPreview:SetPreview=(view,preview)=>{if(!samePreview(view.state.field(field).preview,preview))view.dispatch({effects:previewEffect.of(preview)});};
+  const reopen=(view:EditorView,range:TextRange)=>{const index=view.state.field(field).areas.findIndex(area=>area.historyId&&area.paragraphFrom===range.from&&area.paragraphTo===range.to);if(index>=0)view.dispatch({effects:reveal.of(index)});};
   function build(state:EditorState,previous?:ReviewState,requested:number|null=null,requestedPreview:InPlacePreview|null=null):ReviewState{
-    const path=state.field(editorInfoField,false)?.file?.path,base=path?host.archive.get(path)?.baseline:undefined;
+    const path=state.field(editorInfoField,false)?.file?.path,record=path?host.archive.get(path):undefined,base=record?.baseline,saved=record?.areaAnchors;
     const text=state.doc.toString(),enabled=host.settings.highlights,red=!!host.settings.redDeletions;
-    const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled&&previous.red===red;
-    const areas=unchanged?previous.areas:enabled&&base!==undefined&&text.length+base.length<=150000?reviewAreas(base,text):[];
+    const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled&&previous.red===red&&previous.saved===saved;
+    const currentSaved=record&&record.content!==text?saved?.flatMap(area=>{const mapped=mapAreaRange(record.content,text,area);if(!mapped.range)return [];if(area.from===area.to)mapped.range.to=mapped.range.from;return [{...area,...mapped.range}];}):saved;
+    const areas=unchanged?previous.areas:enabled&&base!==undefined&&text.length+base.length<=150000?historyReviewAreas(base,text,currentSaved):[];
     const raw=unchanged?previous.raw:areas.flatMap((area,areaIndex)=>changes(area.removed,area.added,true).map(c=>({...c,from:c.from+area.from,to:c.to+area.from,oldFrom:c.oldFrom+area.oldFrom,oldTo:c.oldTo+area.oldFrom,areaIndex})));
-    const hovered=unchanged&&requested!==null&&areas[requested]?requested:null;
+    const requestedArea=requested===null?undefined:previous?.areas[requested];
+    const refreshedIndex=requestedArea&&previous?.text===text&&previous.base===base&&previous.path===path?areas.findIndex(area=>requestedArea.historyId?area.historyId===requestedArea.historyId:area.from===requestedArea.from&&area.to===requestedArea.to&&area.removed===requestedArea.removed):-1;
+    const hovered=requested!==null&&areas[requested]&&unchanged?requested:refreshedIndex>=0?refreshedIndex:null;
     const preview=unchanged&&hovered!==null&&requestedPreview?.index===hovered&&requestedPreview.path===path&&requestedPreview.original===text&&requestedPreview.base===base&&requestedPreview.range.from>=0&&requestedPreview.range.to<=text.length&&requestedPreview.range.to>=requestedPreview.range.from?requestedPreview:null;
     if(unchanged&&previous.hovered===hovered&&samePreview(previous.preview,preview))return previous;
     const ranges:Range<Decoration>[]=[];
     if(path&&base!==undefined&&areas.length){
+      areas.forEach((area,index)=>{
+        if(!area.historyId||preview?.index===index)return;
+        if(area.to>area.from)ranges.push(Decoration.mark({class:'tc-area-target',attributes:{'data-tc-area':String(index)}}).range(area.from,area.to));
+        else if(!area.removed)ranges.push(Decoration.widget({widget:new EmptyAreaHistory(index),side:-1}).range(area.from));
+      });
       for(const c of raw){
         const areaIndex=c.areaIndex;
         if(preview&&areaIndex===preview.index)continue;
@@ -125,9 +140,9 @@ export function reviewExtension(host:ReviewHost){
         if(from<to)ranges.push(Decoration.replace({widget,inclusive:false}).range(from,to));
         else ranges.push(Decoration.widget({widget,side:-1}).range(from));
       }
-      if(hovered!==null){const area=areas[hovered],anchor=area.from<area.to?areaRange(text,area).to:area.anchor;ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length,setPreview),block:true,side:1}).range(state.doc.lineAt(anchor).to));}
+      if(hovered!==null){const area=areas[hovered],anchor=area.from<area.to?areaRange(text,area).to:area.anchor;ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length,setPreview,reopen),block:true,side:1}).range(state.doc.lineAt(anchor).to));}
     }
-    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,red,hovered,areas,raw,preview};
+    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,red,saved,hovered,areas,raw,preview};
   }
   const field=StateField.define<ReviewState>({create:state=>build(state),update:(value,tr)=>{
     let hovered=value.hovered,preview=value.preview;for(const effect of tr.effects){if(effect.is(reveal))hovered=effect.value;if(effect.is(previewEffect))preview=effect.value;}
