@@ -70,3 +70,20 @@ test('dismissing a history popup cancels further lazy archive reads',async()=>{
   const archive=source(['New text.','Old text.']),history=new AreaHistory(archive,'n','New text.',{from:0,to:9});
   await history.older(()=>false);assert.equal(archive.reads(),0);assert.equal(history.position,0);
 });
+test('older leading and trailing lines stay inside their paragraph preview',async()=>{
+  const current='Keep.\n\nTarget new.\n\nTail.',older='Keep.\n\nLeading line.\nTarget old.\nTrailing line.\n\nTail.';
+  const from=current.indexOf('Target'),history=new AreaHistory(source([current,older]),'n',current,{from,to:from+'Target new.'.length});
+  await history.older();assert.equal(history.selected.text,'Leading line.\nTarget old.\nTrailing line.');
+});
+test('separate older paragraphs at either boundary do not enter the preview',async()=>{
+  const current='Target new.',older='Unrelated before.\n\nTarget old.\n\nUnrelated after.';
+  const history=new AreaHistory(source([current,older]),'n',current,{from:0,to:current.length});
+  await history.older();assert.equal(history.selected.text,'Target old.');
+});
+test('a grouped deleted continuation leaves current paragraph separators outside restoration',()=>{
+  const base='The original introduction.\nAn old supporting line.\n\nAnother paragraph unchanged.';
+  const current='The revised introduction.\n\nAnother paragraph unchanged.';
+  const range=areaRange(current,reviewAreas(base,current)[0]);
+  assert.equal(current.slice(range.from,range.to),'The revised introduction.');
+  assert.equal(current.slice(range.to),'\n\nAnother paragraph unchanged.');
+});

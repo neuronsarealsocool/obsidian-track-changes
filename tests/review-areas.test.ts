@@ -32,3 +32,15 @@ test('pure insertion, complete deletion, trailing deletion, and CRLF remain acti
   }
 });
 test('unchanged paragraphs create no review boxes',()=>{assert.deepEqual(reviewAreas('same','same'),[]);});
+test('a deleted continuation line stays grouped with edits in its original paragraph',()=>{
+  const base='The original introduction.\nAn old supporting line.\n\nAnother paragraph unchanged.';
+  const current='The revised introduction.\n\nAnother paragraph unchanged.';
+  const areas=reviewAreas(base,current);assert.equal(areas.length,1);
+  assert.equal(acceptOne(base,areas[0]),current);assert.equal(rejectOne(current,areas[0]),base);
+});
+test('a deleted continuation does not absorb edits in the next paragraph',()=>{
+  const base='The original introduction.\nAn old supporting line.\n\nAnother paragraph old.';
+  const current='The revised introduction.\n\nAnother paragraph new.';
+  const areas=reviewAreas(base,current);assert.equal(areas.length,2);
+  assert.equal(acceptOne(base,areas[0]),'The revised introduction.\n\nAnother paragraph old.');
+});

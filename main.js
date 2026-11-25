@@ -648,18 +648,25 @@ var import_state = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 
 // src/review-areas.ts
+function paragraphEnd(text, position) {
+  const separators = /\r?\n[\t ]*\r?\n/g;
+  let match;
+  while (match = separators.exec(text)) if (position < match.index + match[0].length) return match.index;
+  return text.length;
+}
 function reviewAreas(base, current, edits = changes(base, current, true)) {
   const areas = [];
   for (const change of edits) {
     const previous = areas.at(-1);
-    const boundary = current.slice(change.to).search(/\r?\n[\t ]*\r?\n/);
-    const anchor = boundary < 0 ? current.length : change.to + boundary;
-    if (previous && change.from <= previous.anchor) {
+    const anchor = Math.max(change.to, paragraphEnd(current, change.to));
+    const whitespaceContinuation = previous && !change.added.trim() && !change.removed.trim() && !base.slice(previous.oldTo, change.oldFrom).trim() && !current.slice(previous.to, change.from).trim();
+    const sameOldParagraph = previous && (previous.oldTo > previous.oldFrom || !/\r?\n[\t ]*\r?\n/.test(previous.added)) && change.oldFrom <= paragraphEnd(base, Math.max(previous.oldFrom, previous.oldTo - 1));
+    if (previous && (change.from <= previous.anchor || sameOldParagraph || whitespaceContinuation)) {
       previous.to = change.to;
       previous.oldTo = change.oldTo;
       previous.added = current.slice(previous.from, previous.to);
       previous.removed = base.slice(previous.oldFrom, previous.oldTo);
-      previous.anchor = Math.max(previous.anchor, anchor);
+      previous.anchor = Math.max(previous.anchor, whitespaceContinuation ? change.to : anchor);
     } else areas.push({ ...change, anchor });
   }
   return areas;
@@ -672,7 +679,13 @@ function areaRange(text, area) {
   const separators = /\r?\n[\t ]*\r?\n/g;
   let match;
   while ((match = separators.exec(text)) && match.index + match[0].length <= area.from) from = match.index + match[0].length;
-  return { from, to: area.anchor };
+  let to = area.anchor;
+  separators.lastIndex = 0;
+  while (match = separators.exec(text)) if (match.index < to && to <= match.index + match[0].length) {
+    to = match.index;
+    break;
+  }
+  return from <= to ? { from, to } : { from: area.from, to: area.to };
 }
 function mapAreaRange(newer, older, range) {
   if (range.from < 0 || range.to < range.from || range.to > newer.length) throw Error("Invalid area range");
@@ -697,6 +710,24 @@ function mapAreaRange(newer, older, range) {
     return offset + delta;
   }
   let from = position(range.from, 1), to = position(range.to, -1);
+  if (range.from < range.to) {
+    const startsParagraph = range.from === 0 || /\r?\n[\t ]*\r?\n$/.test(newer.slice(0, range.from));
+    const endsParagraph = range.to === newer.length || /^\r?\n[\t ]*\r?\n/.test(newer.slice(range.to));
+    if (startsParagraph && endsParagraph && from < to) {
+      let start = 0, end = older.length, match;
+      const separators = /\r?\n[\t ]*\r?\n/g;
+      while (match = separators.exec(older)) {
+        const after = match.index + match[0].length;
+        if (after <= from) start = after;
+        if (match.index >= to || match.index < to && to <= after) {
+          end = match.index;
+          break;
+        }
+      }
+      from = start;
+      to = end;
+    }
+  }
   if (range.from === range.to) {
     const restored = edits.find((c) => c.oldFrom === range.from && c.oldTo === range.to);
     if (restored) {
@@ -787,6 +818,32 @@ var AreaHistory = class {
 };
 
 // src/inline-review.ts
+var HistoricalText = class extends import_view.WidgetType {
+  constructor(text, index) {
+    super();
+    this.text = text;
+    this.index = index;
+  }
+  eq(other) {
+    return this.text === other.text && this.index === other.index;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "tc-inplace-preview";
+    el.dataset.tcArea = String(this.index);
+    el.contentEditable = "false";
+    el.setAttribute("aria-label", "Temporary historical revision preview");
+    el.setAttribute("role", "note");
+    const text = document.createElement("span");
+    text.className = "tc-inplace-text";
+    text.textContent = this.text || "(Area not present in this revision)";
+    el.appendChild(text);
+    return el;
+  }
+  ignoreEvent() {
+    return true;
+  }
+};
 var DeletedText = class extends import_view.WidgetType {
   constructor(text, areaIndex) {
     super();
@@ -810,7 +867,7 @@ function preview(text) {
   return value.trim() ? value.length > 130 ? `${value.slice(0, 130)}\u2026` : value : "Whitespace";
 }
 var ReviewBox = class extends import_view.WidgetType {
-  constructor(host, path3, base, text, area, index, total) {
+  constructor(host, path3, base, text, area, index, total, setPreview) {
     super();
     this.host = host;
     this.path = path3;
@@ -819,6 +876,7 @@ var ReviewBox = class extends import_view.WidgetType {
     this.area = area;
     this.index = index;
     this.total = total;
+    this.setPreview = setPreview;
   }
   eq(other) {
     return this.host === other.host && this.path === other.path && this.base === other.base && this.text === other.text && this.index === other.index && this.total === other.total;
@@ -879,14 +937,15 @@ var ReviewBox = class extends import_view.WidgetType {
       parent.appendChild(button2);
       return button2;
     };
-    const decide = async (accept) => {
+    const decide = async (accept2) => {
       if (card.getAttribute("aria-busy") === "true") return;
       const enabled = Array.from(card.querySelectorAll("button")).filter((b) => !b.disabled);
       enabled.forEach((b) => b.disabled = true);
       card.setAttribute("aria-busy", "true");
       try {
         if (view.state.doc.toString() !== this.text) throw Error("The note changed while reviewing. Use its updated review box.");
-        await this.host.applyChange(this.path, this.text, this.base, this.area, accept);
+        this.setPreview(view, null);
+        await this.host.applyChange(this.path, this.text, this.base, this.area, accept2);
         view.dispatch({});
       } catch (error) {
         new import_obsidian.Notice(String(error), 9e3);
@@ -895,8 +954,9 @@ var ReviewBox = class extends import_view.WidgetType {
         enabled.forEach((b) => b.disabled = false);
       }
     };
-    addButton("Accept", "accept", () => decide(true)).classList.add("tc-inline-accept");
-    addButton("Reject", "reject", () => decide(false));
+    const accept = addButton("Accept", "accept", () => decide(true));
+    accept.classList.add("tc-inline-accept");
+    const reject = addButton("Reject", "reject", () => decide(false));
     const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area));
     const section = document.createElement("div");
     section.className = "tc-area-history";
@@ -909,9 +969,6 @@ var ReviewBox = class extends import_view.WidgetType {
     status.className = "tc-area-history-status";
     status.setAttribute("aria-live", "polite");
     section.appendChild(status);
-    const version = document.createElement("pre");
-    version.className = "tc-area-version";
-    section.appendChild(version);
     const historyControls = document.createElement("div");
     historyControls.className = "tc-inline-controls";
     section.appendChild(historyControls);
@@ -921,15 +978,18 @@ var ReviewBox = class extends import_view.WidgetType {
     let loading = false;
     const current = () => view.state.doc.toString() === this.text && this.host.archive.get(this.path)?.baseline === this.base;
     const renderHistory = () => {
-      status.textContent = loading ? "Loading earlier revisions\u2026" : history.position === 0 ? "Current text" : `${history.selected.label ? `${history.selected.label} \xB7 ` : ""}${new Date(history.selected.time).toLocaleString()}`;
-      version.hidden = history.position === 0;
-      version.textContent = history.selected.text || "(Area not present in this revision)";
+      status.textContent = loading ? "Loading earlier revisions\u2026" : history.position === 0 ? "Current text" : `Preview in note \xB7 ${history.selected.label ? `${history.selected.label} \xB7 ` : ""}${new Date(history.selected.time).toLocaleString()}`;
       previous.disabled = loading || !history.hasOlder;
       next.disabled = loading || !history.hasNewer;
       restore.hidden = history.position === 0;
       restore.disabled = loading || history.selected.text === history.entries[0].text;
+      cancel.hidden = history.position === 0;
+      cancel.disabled = loading;
+      accept.disabled = loading || history.position > 0;
+      reject.disabled = loading || history.position > 0;
       note.textContent = !history.hasOlder ? history.stopReason : "";
       note.hidden = !note.textContent;
+      if (card.isConnected && current()) this.setPreview(view, history.position === 0 ? null : { path: this.path, base: this.base, original: this.text, index: this.index, range: history.currentRange, text: history.selected.text });
       view.requestMeasure();
     };
     const browse = async (older) => {
@@ -960,6 +1020,7 @@ var ReviewBox = class extends import_view.WidgetType {
       enabled.forEach((b) => b.disabled = true);
       card.setAttribute("aria-busy", "true");
       try {
+        this.setPreview(view, null);
         await this.host.restoreAreaVersion(this.path, this.text, this.base, history.currentRange, history.selected.text);
         view.dispatch({});
       } catch (error) {
@@ -972,6 +1033,10 @@ var ReviewBox = class extends import_view.WidgetType {
     const previous = addButton("\u2190 Previous revision", "previous", () => browse(true), false, historyControls);
     const next = addButton("Next revision \u2192", "next", () => browse(false), true, historyControls);
     const restore = addButton("Use this revision", "restore-area", () => useRevision(), true, historyControls);
+    const cancel = addButton("Cancel preview", "cancel-preview", () => {
+      history.position = 0;
+      renderHistory();
+    }, false, historyControls);
     renderHistory();
     return wrapper;
   }
@@ -985,33 +1050,49 @@ var ReviewBox = class extends import_view.WidgetType {
 };
 function reviewExtension(host) {
   const reveal = import_state.StateEffect.define();
-  function build(state, previous, requested = null) {
+  const previewEffect = import_state.StateEffect.define();
+  const samePreview = (a, b) => a === b || !!a && !!b && a.path === b.path && a.base === b.base && a.original === b.original && a.index === b.index && a.range.from === b.range.from && a.range.to === b.range.to && a.text === b.text;
+  const setPreview = (view, preview2) => {
+    if (!samePreview(view.state.field(field).preview, preview2)) view.dispatch({ effects: previewEffect.of(preview2) });
+  };
+  function build(state, previous, requested = null, requestedPreview = null) {
     const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, base = path3 ? host.archive.get(path3)?.baseline : void 0;
     const text = state.doc.toString(), enabled = host.settings.highlights;
     const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled;
     const raw = unchanged ? previous.raw : enabled && base !== void 0 && text.length + base.length <= 15e4 ? changes(base, text, true) : [];
     const areas = unchanged ? previous.areas : base !== void 0 ? reviewAreas(base, text, raw) : [];
     const hovered = unchanged && requested !== null && areas[requested] ? requested : null;
-    if (unchanged && previous.hovered === hovered) return previous;
+    const preview2 = unchanged && hovered !== null && requestedPreview?.index === hovered && requestedPreview.path === path3 && requestedPreview.original === text && requestedPreview.base === base && requestedPreview.range.from >= 0 && requestedPreview.range.to <= text.length && requestedPreview.range.to >= requestedPreview.range.from ? requestedPreview : null;
+    if (unchanged && previous.hovered === hovered && samePreview(previous.preview, preview2)) return previous;
     const ranges = [];
     if (path3 && base !== void 0 && areas.length) {
       let areaIndex = 0;
       for (const c of raw) {
         while (areaIndex < areas.length - 1 && c.from > areas[areaIndex].to) areaIndex++;
+        if (preview2 && areaIndex === preview2.index) continue;
         if (c.removed) ranges.push(import_view.Decoration.widget({ widget: new DeletedText(c.removed, areaIndex), side: -1 }).range(c.from));
         if (c.to > c.from) ranges.push(import_view.Decoration.mark({ class: "tc-addition", attributes: { "data-tc-area": String(areaIndex) } }).range(c.from, c.to));
       }
+      if (preview2) {
+        const { from, to } = preview2.range;
+        const widget = new HistoricalText(preview2.text, preview2.index);
+        if (from < to) ranges.push(import_view.Decoration.replace({ widget, inclusive: false }).range(from, to));
+        else ranges.push(import_view.Decoration.widget({ widget, side: -1 }).range(from));
+      }
       if (hovered !== null) {
-        const area = areas[hovered];
-        ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length), block: true, side: 1 }).range(state.doc.lineAt(area.anchor).to));
+        const area = areas[hovered], anchor = area.from < area.to ? areaRange(text, area).to : area.anchor;
+        ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length, setPreview), block: true, side: 1 }).range(state.doc.lineAt(anchor).to));
       }
     }
-    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, hovered, areas, raw };
+    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, hovered, areas, raw, preview: preview2 };
   }
   const field = import_state.StateField.define({ create: (state) => build(state), update: (value, tr) => {
-    let hovered = value.hovered;
-    for (const effect of tr.effects) if (effect.is(reveal)) hovered = effect.value;
-    return build(tr.state, value, hovered);
+    let hovered = value.hovered, preview2 = value.preview;
+    for (const effect of tr.effects) {
+      if (effect.is(reveal)) hovered = effect.value;
+      if (effect.is(previewEffect)) preview2 = effect.value;
+    }
+    return build(tr.state, value, hovered, preview2);
   }, provide: (f) => import_view.EditorView.decorations.from(f, (value) => value.decorations) });
   const capture = import_view.ViewPlugin.fromClass(class {
     constructor(view) {
@@ -1020,6 +1101,11 @@ function reviewExtension(host) {
       view.dom.addEventListener("pointermove", this.enter);
       view.dom.addEventListener("pointerout", this.leave);
       view.dom.addEventListener("pointerleave", this.exit);
+      view.dom.addEventListener("keydown", this.keydown, true);
+      view.dom.addEventListener("beforeinput", this.edit, true);
+      view.dom.addEventListener("paste", this.edit, true);
+      view.dom.addEventListener("cut", this.edit, true);
+      view.dom.addEventListener("drop", this.edit, true);
     }
     hideTimer;
     index(target) {
@@ -1059,12 +1145,36 @@ function reviewExtension(host) {
       if (this.index(event.target) === current) this.hide();
     };
     exit = () => this.hide();
+    keydown = (event) => {
+      const state = this.view.state.field(field);
+      if (event.key === "Escape" && state.hovered !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.cancel();
+        this.show(null);
+        return;
+      }
+      if (state.preview && (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey || ["Backspace", "Delete", "Enter", "Tab"].includes(event.key)) && !event.target?.closest?.("button")) this.edit(event);
+    };
+    edit = (event) => {
+      if (this.view.state.field(field).preview) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.cancel();
+        this.show(null);
+      }
+    };
     destroy() {
       this.cancel();
       this.view.dom.removeEventListener("pointerover", this.enter);
       this.view.dom.removeEventListener("pointermove", this.enter);
       this.view.dom.removeEventListener("pointerout", this.leave);
       this.view.dom.removeEventListener("pointerleave", this.exit);
+      this.view.dom.removeEventListener("keydown", this.keydown, true);
+      this.view.dom.removeEventListener("beforeinput", this.edit, true);
+      this.view.dom.removeEventListener("paste", this.edit, true);
+      this.view.dom.removeEventListener("cut", this.edit, true);
+      this.view.dom.removeEventListener("drop", this.edit, true);
     }
     update(update) {
       const file = update.state.field(import_obsidian.editorInfoField, false)?.file;

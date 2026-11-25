@@ -6,7 +6,7 @@
   const instance=new real.constructor(app,real.manifest);
   instance.archive=new real.archive.constructor(require('path').join(globalThis.__trackChangesTestDirectory,`preview-${Date.now()}`));
   await instance.archive.init();instance.ready=true;instance.refreshEditors=()=>{};instance.refreshViews=()=>{};
-  const base='That is the original introduction.\n\nA second paragraph stays here.\n\nEverything else remains the same.';
+  const base='That is the original introduction.\nA supporting line from the earlier revision.\n\nA second paragraph stays here.\n\nEverything else remains the same.';
   const text='That is the revised introduction.\n\nA second paragraph now has a change.\n\nEverything else remains the same.';
   await instance.capture('preview.md',base);
   const active=app.workspace.getLeavesOfType('markdown').find(l=>l.view.editor?.cm).view.editor.cm;

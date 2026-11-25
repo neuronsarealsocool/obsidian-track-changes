@@ -13,6 +13,18 @@ interface ReviewHost {
   applyChange:(path:string,expected:string,base:string,change:Change|undefined,accept:boolean)=>Promise<void>;
   restoreAreaVersion:(path:string,expected:string,base:string,range:TextRange,text:string)=>Promise<void>;
 }
+interface InPlacePreview {path:string;base:string;original:string;index:number;range:TextRange;text:string}
+type SetPreview=(view:EditorView,preview:InPlacePreview|null)=>void;
+class HistoricalText extends WidgetType {
+  constructor(readonly text:string,readonly index:number){super();}
+  eq(other:HistoricalText){return this.text===other.text&&this.index===other.index;}
+  toDOM(){
+    const el=document.createElement('span');el.className='tc-inplace-preview';el.dataset.tcArea=String(this.index);el.contentEditable='false';
+    el.setAttribute('aria-label','Temporary historical revision preview');el.setAttribute('role','note');
+    const text=document.createElement('span');text.className='tc-inplace-text';text.textContent=this.text||'(Area not present in this revision)';el.appendChild(text);return el;
+  }
+  ignoreEvent(){return true;}
+}
 class DeletedText extends WidgetType {
   constructor(readonly text:string,readonly areaIndex:number){super();}
   eq(other:DeletedText){return other.text===this.text&&other.areaIndex===this.areaIndex;}
@@ -21,7 +33,7 @@ class DeletedText extends WidgetType {
 function preview(text:string){const value=text.replace(/\r?\n/g,' ↵ ');return value.trim()?value.length>130?`${value.slice(0,130)}…`:value:'Whitespace';}
 
 class ReviewBox extends WidgetType {
-  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number){super();}
+  constructor(readonly host:ReviewHost,readonly path:string,readonly base:string,readonly text:string,readonly area:ReviewArea,readonly index:number,readonly total:number,readonly setPreview:SetPreview){super();}
   eq(other:ReviewBox){return this.host===other.host&&this.path===other.path&&this.base===other.base&&this.text===other.text&&this.index===other.index&&this.total===other.total;}
   toDOM(view:EditorView){
     const wrapper=document.createElement('div');wrapper.className='tc-inline-container';wrapper.contentEditable='false';wrapper.dataset.tcArea=String(this.index);
@@ -44,29 +56,30 @@ class ReviewBox extends WidgetType {
       enabled.forEach(b=>b.disabled=true);card.setAttribute('aria-busy','true');
       try{
         if(view.state.doc.toString()!==this.text)throw Error('The note changed while reviewing. Use its updated review box.');
-        await this.host.applyChange(this.path,this.text,this.base,this.area,accept);
+        this.setPreview(view,null);await this.host.applyChange(this.path,this.text,this.base,this.area,accept);
         // Also refresh disposable editors and other callers outside the workspace.
         view.dispatch({});
       }catch(error){new Notice(String(error),9000);}
       finally{card.removeAttribute('aria-busy');enabled.forEach(b=>b.disabled=false);}
     };
-    addButton('Accept','accept',()=>decide(true)).classList.add('tc-inline-accept');
-    addButton('Reject','reject',()=>decide(false));
+    const accept=addButton('Accept','accept',()=>decide(true));accept.classList.add('tc-inline-accept');
+    const reject=addButton('Reject','reject',()=>decide(false));
     const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area));
     const section=document.createElement('div');section.className='tc-area-history';card.appendChild(section);
     const historyTitle=document.createElement('div');historyTitle.className='tc-area-history-title';historyTitle.textContent='This area’s revisions';section.appendChild(historyTitle);
     const status=document.createElement('div');status.className='tc-area-history-status';status.setAttribute('aria-live','polite');section.appendChild(status);
-    const version=document.createElement('pre');version.className='tc-area-version';section.appendChild(version);
     const historyControls=document.createElement('div');historyControls.className='tc-inline-controls';section.appendChild(historyControls);
     const note=document.createElement('div');note.className='tc-area-history-note';section.appendChild(note);
     let loading=false;
     const current=()=>view.state.doc.toString()===this.text&&this.host.archive.get(this.path)?.baseline===this.base;
     const renderHistory=()=>{
-      status.textContent=loading?'Loading earlier revisions…':history.position===0?'Current text':`${history.selected.label?`${history.selected.label} · `:''}${new Date(history.selected.time!).toLocaleString()}`;
-      version.hidden=history.position===0;version.textContent=history.selected.text||'(Area not present in this revision)';
+      status.textContent=loading?'Loading earlier revisions…':history.position===0?'Current text':`Preview in note · ${history.selected.label?`${history.selected.label} · `:''}${new Date(history.selected.time!).toLocaleString()}`;
       previous.disabled=loading||!history.hasOlder;next.disabled=loading||!history.hasNewer;
       restore.hidden=history.position===0;restore.disabled=loading||history.selected.text===history.entries[0].text;
+      cancel.hidden=history.position===0;cancel.disabled=loading;
+      accept.disabled=loading||history.position>0;reject.disabled=loading||history.position>0;
       note.textContent=!history.hasOlder?history.stopReason:'';note.hidden=!note.textContent;
+      if(card.isConnected&&current())this.setPreview(view,history.position===0?null:{path:this.path,base:this.base,original:this.text,index:this.index,range:history.currentRange,text:history.selected.text});
       view.requestMeasure();
     };
     const browse=async(older:boolean)=>{
@@ -80,13 +93,14 @@ class ReviewBox extends WidgetType {
       if(loading||history.position===0)return;
       if(!current()){view.dispatch({});return;}
       const enabled=Array.from(card.querySelectorAll<HTMLButtonElement>('button')).filter(b=>!b.disabled);enabled.forEach(b=>b.disabled=true);card.setAttribute('aria-busy','true');
-      try{await this.host.restoreAreaVersion(this.path,this.text,this.base,history.currentRange,history.selected.text);view.dispatch({});}
+      try{this.setPreview(view,null);await this.host.restoreAreaVersion(this.path,this.text,this.base,history.currentRange,history.selected.text);view.dispatch({});}
       catch(error){new Notice(String(error),9000);}
       finally{card.removeAttribute('aria-busy');enabled.forEach(b=>b.disabled=false);}
     };
     const previous=addButton('← Previous revision','previous',()=>browse(true),false,historyControls);
     const next=addButton('Next revision →','next',()=>browse(false),true,historyControls);
     const restore=addButton('Use this revision','restore-area',()=>useRevision(),true,historyControls);
+    const cancel=addButton('Cancel preview','cancel-preview',()=>{history.position=0;renderHistory();},false,historyControls);
     renderHistory();
     return wrapper;
   }
@@ -95,32 +109,43 @@ class ReviewBox extends WidgetType {
   get estimatedHeight(){return 132;}
 }
 
-interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;hovered:number|null;areas:ReviewArea[];raw:Change[]}
+interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;hovered:number|null;areas:ReviewArea[];raw:Change[];preview:InPlacePreview|null}
 export function reviewExtension(host:ReviewHost){
   const reveal=StateEffect.define<number|null>();
-  function build(state:EditorState,previous?:ReviewState,requested:number|null=null):ReviewState{
+  const previewEffect=StateEffect.define<InPlacePreview|null>();
+  const samePreview=(a:InPlacePreview|null,b:InPlacePreview|null)=>a===b||!!a&&!!b&&a.path===b.path&&a.base===b.base&&a.original===b.original&&a.index===b.index&&a.range.from===b.range.from&&a.range.to===b.range.to&&a.text===b.text;
+  const setPreview:SetPreview=(view,preview)=>{if(!samePreview(view.state.field(field).preview,preview))view.dispatch({effects:previewEffect.of(preview)});};
+  function build(state:EditorState,previous?:ReviewState,requested:number|null=null,requestedPreview:InPlacePreview|null=null):ReviewState{
     const path=state.field(editorInfoField,false)?.file?.path,base=path?host.archive.get(path)?.baseline:undefined;
     const text=state.doc.toString(),enabled=host.settings.highlights;
     const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled;
     const raw=unchanged?previous.raw:enabled&&base!==undefined&&text.length+base.length<=150000?changes(base,text,true):[];
     const areas=unchanged?previous.areas:base!==undefined?reviewAreas(base,text,raw):[];
     const hovered=unchanged&&requested!==null&&areas[requested]?requested:null;
-    if(unchanged&&previous.hovered===hovered)return previous;
+    const preview=unchanged&&hovered!==null&&requestedPreview?.index===hovered&&requestedPreview.path===path&&requestedPreview.original===text&&requestedPreview.base===base&&requestedPreview.range.from>=0&&requestedPreview.range.to<=text.length&&requestedPreview.range.to>=requestedPreview.range.from?requestedPreview:null;
+    if(unchanged&&previous.hovered===hovered&&samePreview(previous.preview,preview))return previous;
     const ranges:Range<Decoration>[]=[];
     if(path&&base!==undefined&&areas.length){
       let areaIndex=0;
       for(const c of raw){
         while(areaIndex<areas.length-1&&c.from>areas[areaIndex].to)areaIndex++;
+        if(preview&&areaIndex===preview.index)continue;
         if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed,areaIndex),side:-1}).range(c.from));
         if(c.to>c.from)ranges.push(Decoration.mark({class:'tc-addition',attributes:{'data-tc-area':String(areaIndex)}}).range(c.from,c.to));
       }
-      if(hovered!==null){const area=areas[hovered];ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length),block:true,side:1}).range(state.doc.lineAt(area.anchor).to));}
+      if(preview){
+        const {from,to}=preview.range;
+        const widget=new HistoricalText(preview.text,preview.index);
+        if(from<to)ranges.push(Decoration.replace({widget,inclusive:false}).range(from,to));
+        else ranges.push(Decoration.widget({widget,side:-1}).range(from));
+      }
+      if(hovered!==null){const area=areas[hovered],anchor=area.from<area.to?areaRange(text,area).to:area.anchor;ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length,setPreview),block:true,side:1}).range(state.doc.lineAt(anchor).to));}
     }
-    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,hovered,areas,raw};
+    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,hovered,areas,raw,preview};
   }
   const field=StateField.define<ReviewState>({create:state=>build(state),update:(value,tr)=>{
-    let hovered=value.hovered;for(const effect of tr.effects)if(effect.is(reveal))hovered=effect.value;
-    return build(tr.state,value,hovered);
+    let hovered=value.hovered,preview=value.preview;for(const effect of tr.effects){if(effect.is(reveal))hovered=effect.value;if(effect.is(previewEffect))preview=effect.value;}
+    return build(tr.state,value,hovered,preview);
   },provide:f=>EditorView.decorations.from(f,value=>value.decorations)});
   // Block widgets must be provided directly by a state field. Capture events
   // stay in a view plugin so rebuilding decorations never performs async work.
@@ -131,6 +156,11 @@ export function reviewExtension(host:ReviewHost){
       view.dom.addEventListener('pointermove',this.enter);
       view.dom.addEventListener('pointerout',this.leave);
       view.dom.addEventListener('pointerleave',this.exit);
+      view.dom.addEventListener('keydown',this.keydown,true);
+      view.dom.addEventListener('beforeinput',this.edit,true);
+      view.dom.addEventListener('paste',this.edit,true);
+      view.dom.addEventListener('cut',this.edit,true);
+      view.dom.addEventListener('drop',this.edit,true);
     }
     private index(target:EventTarget|null):number|null{
       const element=(target as Element|null)?.closest?.('[data-tc-area]');
@@ -152,7 +182,13 @@ export function reviewExtension(host:ReviewHost){
       if(this.index(event.target)===current)this.hide();
     };
     private exit=()=>this.hide();
-    destroy(){this.cancel();this.view.dom.removeEventListener('pointerover',this.enter);this.view.dom.removeEventListener('pointermove',this.enter);this.view.dom.removeEventListener('pointerout',this.leave);this.view.dom.removeEventListener('pointerleave',this.exit);}
+    private keydown=(event:KeyboardEvent)=>{
+      const state=this.view.state.field(field);
+      if(event.key==='Escape'&&state.hovered!==null){event.preventDefault();event.stopPropagation();this.cancel();this.show(null);return;}
+      if(state.preview&&((event.key.length===1&&!event.ctrlKey&&!event.metaKey&&!event.altKey)||['Backspace','Delete','Enter','Tab'].includes(event.key))&&!(event.target as Element)?.closest?.('button'))this.edit(event);
+    };
+    private edit=(event:Event)=>{if(this.view.state.field(field).preview){event.preventDefault();event.stopPropagation();this.cancel();this.show(null);}};
+    destroy(){this.cancel();this.view.dom.removeEventListener('pointerover',this.enter);this.view.dom.removeEventListener('pointermove',this.enter);this.view.dom.removeEventListener('pointerout',this.leave);this.view.dom.removeEventListener('pointerleave',this.exit);this.view.dom.removeEventListener('keydown',this.keydown,true);this.view.dom.removeEventListener('beforeinput',this.edit,true);this.view.dom.removeEventListener('paste',this.edit,true);this.view.dom.removeEventListener('cut',this.edit,true);this.view.dom.removeEventListener('drop',this.edit,true);}
     update(update:ViewUpdate){
       const file=update.state.field(editorInfoField,false)?.file;
       if(update.docChanged&&file){

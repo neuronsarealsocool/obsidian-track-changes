@@ -1,7 +1,7 @@
 {
   "id": "track-changes",
   "name": "Track Changes",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.5.0",
   "description": "Review additions and deletions, accept or reject edits, and keep a local revision history without automatic expiry.",
   "author": "neuronsarealsocool",

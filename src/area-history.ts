@@ -15,7 +15,9 @@ export function areaRange(text:string,area:ReviewArea):TextRange{
   if(area.from===area.to)return {from:area.from,to:area.to};
   let from=0;const separators=/\r?\n[\t ]*\r?\n/g;let match:RegExpExecArray|null;
   while((match=separators.exec(text))&&match.index+match[0].length<=area.from)from=match.index+match[0].length;
-  return {from,to:area.anchor};
+  let to=area.anchor;separators.lastIndex=0;
+  while((match=separators.exec(text)))if(match.index<to&&to<=match.index+match[0].length){to=match.index;break;}
+  return from<=to?{from,to}:{from:area.from,to:area.to};
 }
 
 /** Map this area's boundaries through one adjacent pair of full-note versions.
@@ -39,6 +41,21 @@ export function mapAreaRange(newer:string,older:string,range:TextRange):{range?:
     return offset+delta;
   }
   let from=position(range.from,1),to=position(range.to,-1);
+  if(range.from<range.to){
+    const startsParagraph=range.from===0||/\r?\n[\t ]*\r?\n$/.test(newer.slice(0,range.from));
+    const endsParagraph=range.to===newer.length||/^\r?\n[\t ]*\r?\n/.test(newer.slice(range.to));
+    if(startsParagraph&&endsParagraph&&from<to){
+      // Token diffs may anchor an inserted line to a neighboring newline.
+      // Follow the complete historical paragraph, bounded by blank separators.
+      let start=0,end=older.length,match:RegExpExecArray|null;const separators=/\r?\n[\t ]*\r?\n/g;
+      while((match=separators.exec(older))){
+        const after=match.index+match[0].length;
+        if(after<=from)start=after;
+        if(match.index>=to||(match.index<to&&to<=after)){end=match.index;break;}
+      }
+      from=start;to=end;
+    }
+  }
   if(range.from===range.to){
     const restored=edits.find(c=>c.oldFrom===range.from&&c.oldTo===range.to);
     if(restored){from=restored.from;to=restored.to;}
