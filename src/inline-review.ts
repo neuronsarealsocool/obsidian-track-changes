@@ -74,7 +74,8 @@ class ReviewBox extends WidgetType {
     };
     const accept=addButton('Accept','accept',()=>decide(true));accept.classList.add('tc-inline-accept');
     const reject=addButton('Reject','reject',()=>decide(false));
-    const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area));
+    const origin=this.area.paragraphFrom===undefined&&this.area.from===this.area.to?{document:this.base,range:{from:this.area.oldFrom,to:this.area.oldTo}}:undefined;
+    const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area),origin);
     const section=document.createElement('div');section.className='tc-area-history';card.appendChild(section);
     const historyTitle=document.createElement('div');historyTitle.className='tc-area-history-title';historyTitle.textContent='This area’s revisions';section.appendChild(historyTitle);
     const status=document.createElement('div');status.className='tc-area-history-status';status.setAttribute('aria-live','polite');section.appendChild(status);
@@ -119,7 +120,8 @@ class ReviewBox extends WidgetType {
   get estimatedHeight(){return 132;}
 }
 
-interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;hovered:number|null;areas:ReviewArea[];raw:Change[];preview:InPlacePreview|null}
+interface AreaChange extends Change {areaIndex:number}
+interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;hovered:number|null;areas:ReviewArea[];raw:AreaChange[];preview:InPlacePreview|null}
 export function reviewExtension(host:ReviewHost){
   const reveal=StateEffect.define<number|null>();
   const previewEffect=StateEffect.define<InPlacePreview|null>();
@@ -129,16 +131,15 @@ export function reviewExtension(host:ReviewHost){
     const path=state.field(editorInfoField,false)?.file?.path,base=path?host.archive.get(path)?.baseline:undefined;
     const text=state.doc.toString(),enabled=host.settings.highlights;
     const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled;
-    const raw=unchanged?previous.raw:enabled&&base!==undefined&&text.length+base.length<=150000?changes(base,text,true):[];
-    const areas=unchanged?previous.areas:base!==undefined?reviewAreas(base,text,raw):[];
+    const areas=unchanged?previous.areas:enabled&&base!==undefined&&text.length+base.length<=150000?reviewAreas(base,text):[];
+    const raw=unchanged?previous.raw:areas.flatMap((area,areaIndex)=>changes(area.removed,area.added,true).map(c=>({...c,from:c.from+area.from,to:c.to+area.from,oldFrom:c.oldFrom+area.oldFrom,oldTo:c.oldTo+area.oldFrom,areaIndex})));
     const hovered=unchanged&&requested!==null&&areas[requested]?requested:null;
     const preview=unchanged&&hovered!==null&&requestedPreview?.index===hovered&&requestedPreview.path===path&&requestedPreview.original===text&&requestedPreview.base===base&&requestedPreview.range.from>=0&&requestedPreview.range.to<=text.length&&requestedPreview.range.to>=requestedPreview.range.from?requestedPreview:null;
     if(unchanged&&previous.hovered===hovered&&samePreview(previous.preview,preview))return previous;
     const ranges:Range<Decoration>[]=[];
     if(path&&base!==undefined&&areas.length){
-      let areaIndex=0;
       for(const c of raw){
-        while(areaIndex<areas.length-1&&c.from>areas[areaIndex].to)areaIndex++;
+        const areaIndex=c.areaIndex;
         if(preview&&areaIndex===preview.index)continue;
         if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed,areaIndex),side:-1}).range(c.from));
         if(c.to>c.from)ranges.push(Decoration.mark({class:'tc-addition',attributes:{'data-tc-area':String(areaIndex)}}).range(c.from,c.to));

@@ -87,3 +87,18 @@ test('a grouped deleted continuation leaves current paragraph separators outside
   assert.equal(current.slice(range.from,range.to),'The revised introduction.');
   assert.equal(current.slice(range.to),'\n\nAnother paragraph unchanged.');
 });
+test('historical paragraph changes never include a neighbouring paragraph',async()=>{
+  const current='A joined replacement.',older='First former paragraph.\n\nSecond former paragraph.';
+  const history=new AreaHistory(source([current,older]),'n',current,{from:0,to:current.length});
+  await history.older();assert.ok(history.position===0||!history.selected.text.includes('Second former paragraph.'));
+});
+test('a deleted paragraph keeps its own origin when multiple paragraphs were deleted',async()=>{
+  const base='First deleted.\n\nSecond deleted.\n\nThird deleted.',area=reviewAreas(base,'')[1];
+  const history=new AreaHistory(source(['',base]),'n','',areaRange('',area),{document:base,range:{from:area.oldFrom,to:area.oldTo}});
+  await history.older();assert.equal(history.selected.text,'Second deleted.\n\n');
+});
+test('a pasted block can preview the absence of just one inserted paragraph',async()=>{
+  const current='First pasted.\n\nSecond pasted.\n\nThird pasted.',area=reviewAreas('',current)[1];
+  const history=new AreaHistory(source([current,'']),'n',current,areaRange(current,area));
+  await history.older();assert.equal(history.selected.text,'');assert.equal(history.position,1);
+});

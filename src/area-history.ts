@@ -1,8 +1,10 @@
 import {changes} from './changes';
 import {ReviewArea} from './review-areas';
 import {Revision} from './storage';
+import {paragraphs} from './paragraphs';
 
 export interface TextRange {from:number;to:number}
+export interface AreaOrigin {document:string;range:TextRange}
 export interface AreaVersion {text:string;time?:string;id?:string;label?:string;kind:string}
 export interface AreaHistorySource {
   get:(path:string)=>{docId:string}|undefined;
@@ -10,6 +12,7 @@ export interface AreaHistorySource {
   load:(docId:string,name:string)=>Promise<Pick<Revision,'id'|'content'|'time'|'label'|'kind'>>;
 }
 export function areaRange(text:string,area:ReviewArea):TextRange{
+  if(area.paragraphFrom!==undefined&&area.paragraphTo!==undefined&&area.paragraphFrom>=0&&area.paragraphTo>=area.paragraphFrom&&area.paragraphTo<=text.length)return {from:area.paragraphFrom,to:area.paragraphTo};
   // A deleted range has no current paragraph of its own. Keep its insertion
   // point rather than borrowing the surviving paragraph beside it.
   if(area.from===area.to)return {from:area.from,to:area.to};
@@ -28,7 +31,7 @@ export function mapAreaRange(newer:string,older:string,range:TextRange):{range?:
   for(const c of edits){
     const crossesStart=c.oldFrom<range.from&&c.oldTo>range.from&&newer.slice(c.oldFrom,range.from).trim()!=='';
     const crossesEnd=c.oldFrom<range.to&&c.oldTo>range.to&&newer.slice(range.to,c.oldTo).trim()!=='';
-    if(crossesStart||crossesEnd)return {reason:'An earlier rewrite also changed surrounding text. Its area cannot be isolated safely.'};
+    if((crossesStart||crossesEnd)&&c.added.trim()!=='')return {reason:'An earlier rewrite also changed surrounding text. Its area cannot be isolated safely.'};
   }
   function position(offset:number,side:number){
     let delta=0;
@@ -62,9 +65,10 @@ export function mapAreaRange(newer:string,older:string,range:TextRange):{range?:
   }
   if(from>to)return {reason:'The older area boundary is ambiguous.'};
   const currentText=newer.slice(range.from,range.to),oldText=older.slice(from,to);
+  if(paragraphs(currentText).filter(p=>p.body.trim()).length<=1&&range.from<range.to&&paragraphs(oldText).filter(p=>p.body.trim()).length>1)return {reason:'This earlier version split or joined the paragraph. Its text cannot be isolated safely.'};
   const overlaps=edits.some(c=>c.oldFrom<range.to&&c.oldTo>range.from);
   const repeated=(document:string,value:string)=>!!value&&document.indexOf(value)!==document.lastIndexOf(value);
-  if(overlaps&&(repeated(newer,currentText)||repeated(older,oldText)))return {reason:'Repeated text makes this earlier area ambiguous. Use the full-note history to compare it.'};
+  if(overlaps&&oldText&&(repeated(newer,currentText)||repeated(older,oldText)))return {reason:'Repeated text makes this earlier area ambiguous. Use the full-note history to compare it.'};
   return {range:{from,to}};
 }
 
@@ -73,8 +77,10 @@ export class AreaHistory {
   readonly entries:AreaVersion[];position=0;finished=false;stopReason='';
   private document:string;private range:TextRange;private names?:string[];private cursor=0;
   private readonly docId?:string;
-  constructor(readonly source:AreaHistorySource,path:string,text:string,readonly currentRange:TextRange){
+  private deletionOrigin?:AreaOrigin;
+  constructor(readonly source:AreaHistorySource,path:string,text:string,readonly currentRange:TextRange,origin?:AreaOrigin){
     this.docId=source.get(path)?.docId;this.document=text;this.range={...currentRange};
+    if(currentRange.from===currentRange.to&&origin)this.deletionOrigin=origin;
     this.entries=[{text:text.slice(currentRange.from,currentRange.to),kind:'current'}];
     if(!this.docId){this.finished=true;this.stopReason='No saved revisions for this area yet.';}
   }
@@ -91,8 +97,10 @@ export class AreaHistory {
       const revision=await this.source.load(this.docId,this.names[this.cursor]);this.cursor++;
       if(!keepReading())return this.selected;
       if(revision.content===this.document)continue;
-      const mapped=mapAreaRange(this.document,revision.content,this.range);
+      const mapped=mapAreaRange(this.deletionOrigin?.document??this.document,revision.content,this.deletionOrigin?.range??this.range);
       if(!mapped.range){this.finished=true;this.stopReason=mapped.reason!;return this.selected;}
+      if(this.deletionOrigin&&mapped.range.from===mapped.range.to)continue;
+      this.deletionOrigin=undefined;
       this.document=revision.content;this.range=mapped.range;
       const text=revision.content.slice(this.range.from,this.range.to);
       if(text===this.entries.at(-1)!.text)continue;

@@ -54,7 +54,9 @@ Your existing Edit History plugin can remain installed and keeps its own indepen
 
 ### Area revision browsing
 
-The popup follows the hovered paragraph, or contiguous changed area, backward through adjacent full-note snapshots. It adjusts boundaries when text before the area is inserted or deleted and skips consecutive snapshots where only other parts of the note changed. Older snapshots are read on demand; reopening the popup starts at the current text. A return to a formerly used value remains a separate revision.
+The popup follows the hovered paragraph backward through adjacent full-note snapshots. Blank lines separate paragraphs; ordinary soft line breaks within a paragraph stay together. Paragraphs are aligned before their words are compared, so a pasted block or paragraph split produces independent review areas. Preview and restore ranges are bounded to each paragraph. Deleted paragraphs retain their own accepted-text origins, including when several paragraphs were deleted at once.
+
+Area history adjusts boundaries when text before the paragraph is inserted or deleted and skips consecutive snapshots where only other parts of the note changed. Older snapshots are read on demand; reopening the popup starts at the current text. A return to a formerly used value remains a separate revision. If an older version cannot isolate a single paragraph safely, the popup explains that and leaves the full snapshot available in note history.
 
 Historical text is shown as a temporary, read-only replacement in the editor, including older continuation lines. It is not written into the note, undo history, or revision archive while browsing. Pending-edit Accept / Reject buttons are disabled during a historical preview. To start editing, cancel the preview first; a typing, paste, cut, or drop attempt also cancels it without applying that first input. Incoming document changes cancel the preview and preserve the new current text. The preview is removed when the review box closes, the highlighted area changes, or the plugin unloads.
 

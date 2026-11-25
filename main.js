@@ -511,6 +511,23 @@ function diffWordsWithSpace(oldStr, newStr, options) {
   return wordsWithSpaceDiff.diff(oldStr, newStr, options);
 }
 
+// node_modules/diff/libesm/diff/array.js
+var ArrayDiff = class extends Diff {
+  tokenize(value) {
+    return value.slice();
+  }
+  join(value) {
+    return value;
+  }
+  removeEmpty(value) {
+    return value;
+  }
+};
+var arrayDiff = new ArrayDiff();
+function diffArrays(oldArr, newArr, options) {
+  return arrayDiff.diff(oldArr, newArr, options);
+}
+
 // src/main.ts
 var import_node_path2 = __toESM(require("node:path"));
 var import_node_os = __toESM(require("node:os"));
@@ -647,33 +664,106 @@ var import_obsidian = require("obsidian");
 var import_state = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 
-// src/review-areas.ts
-function paragraphEnd(text, position) {
-  const separators = /\r?\n[\t ]*\r?\n/g;
-  let match;
-  while (match = separators.exec(text)) if (position < match.index + match[0].length) return match.index;
-  return text.length;
-}
-function reviewAreas(base, current, edits = changes(base, current, true)) {
-  const areas = [];
-  for (const change of edits) {
-    const previous = areas.at(-1);
-    const anchor = Math.max(change.to, paragraphEnd(current, change.to));
-    const whitespaceContinuation = previous && !change.added.trim() && !change.removed.trim() && !base.slice(previous.oldTo, change.oldFrom).trim() && !current.slice(previous.to, change.from).trim();
-    const sameOldParagraph = previous && (previous.oldTo > previous.oldFrom || !/\r?\n[\t ]*\r?\n/.test(previous.added)) && change.oldFrom <= paragraphEnd(base, Math.max(previous.oldFrom, previous.oldTo - 1));
-    if (previous && (change.from <= previous.anchor || sameOldParagraph || whitespaceContinuation)) {
-      previous.to = change.to;
-      previous.oldTo = change.oldTo;
-      previous.added = current.slice(previous.from, previous.to);
-      previous.removed = base.slice(previous.oldFrom, previous.oldTo);
-      previous.anchor = Math.max(previous.anchor, whitespaceContinuation ? change.to : anchor);
-    } else areas.push({ ...change, anchor });
+// src/paragraphs.ts
+function paragraphs(text) {
+  const result = [];
+  let from = 0, match;
+  const separators = /\r?\n[\t ]*\r?\n(?:[\t ]*\r?\n)*/g;
+  while (match = separators.exec(text)) {
+    const to = match.index + match[0].length;
+    result.push({ from, bodyTo: match.index, to, body: text.slice(from, match.index), separator: match[0], text: text.slice(from, to) });
+    from = to;
   }
-  return areas;
+  if (from < text.length) result.push({ from, bodyTo: text.length, to: text.length, body: text.slice(from), separator: "", text: text.slice(from) });
+  return result;
+}
+
+// src/review-areas.ts
+function reviewAreas(base, current) {
+  const old = paragraphs(base), now = paragraphs(current), pending = [];
+  const currentMeta = (p) => ({ paragraphFrom: p.from, paragraphTo: p.bodyTo });
+  function paired(a, b, index) {
+    const metadata = { ...currentMeta(b), oldParagraphFrom: a.from, oldParagraphTo: a.bodyTo };
+    for (const kind of ["body", "separator"]) {
+      const before = kind === "body" ? a.body : a.separator, after = kind === "body" ? b.body : b.separator;
+      if (before === after) continue;
+      const edits = changes(before, after, true);
+      if (!edits.length) continue;
+      const first = edits[0], last = edits.at(-1), oldOffset = kind === "body" ? a.from : a.bodyTo, offset = kind === "body" ? b.from : b.bodyTo;
+      const from = offset + first.from, to = offset + last.to, oldFrom = oldOffset + first.oldFrom, oldTo = oldOffset + last.oldTo;
+      pending.push({ kind, paragraph: index, area: { from, to, oldFrom, oldTo, removed: base.slice(oldFrom, oldTo), added: current.slice(from, to), anchor: Math.max(b.bodyTo, to), ...metadata } });
+    }
+  }
+  function inserted(b, point, index) {
+    pending.push({ kind: "insert", paragraph: index, area: { from: b.from, to: b.to, oldFrom: point, oldTo: point, removed: "", added: b.text, anchor: b.to, ...currentMeta(b) } });
+  }
+  function deleted(a, point) {
+    pending.push({ kind: "delete", area: { from: point, to: point, oldFrom: a.from, oldTo: a.to, removed: a.text, added: "", anchor: point, oldParagraphFrom: a.from, oldParagraphTo: a.bodyTo } });
+  }
+  let oi = 0, ni = 0, oldRun = [], newRun = [], oldStart = 0, newStart = 0;
+  function flush() {
+    if (!oldRun.length && !newRun.length) return;
+    const common = Math.min(oldRun.length, newRun.length);
+    let oldPoint = old[oldStart]?.from ?? base.length, point = now[newStart]?.from ?? current.length;
+    for (let i = 0; i < common; i++) {
+      paired(oldRun[i], newRun[i], newStart + i);
+      oldPoint = oldRun[i].to;
+      point = newRun[i].to;
+    }
+    for (let i = common; i < oldRun.length; i++) {
+      deleted(oldRun[i], point);
+      oldPoint = oldRun[i].to;
+    }
+    for (let i = common; i < newRun.length; i++) inserted(newRun[i], oldPoint, newStart + i);
+    oldRun = [];
+    newRun = [];
+  }
+  const parts = diffArrays(old.map((p) => p.body), now.map((p) => p.body), { timeout: 150 }) ?? [{ removed: true, value: old.map((p) => p.body) }, { added: true, value: now.map((p) => p.body) }];
+  for (const part of parts) {
+    if (!part.added && !part.removed) {
+      flush();
+      for (let i = 0; i < part.value.length; i++) paired(old[oi++], now[ni], ni++);
+    } else {
+      if (!oldRun.length && !newRun.length) {
+        oldStart = oi;
+        newStart = ni;
+      }
+      if (part.removed) {
+        oldRun.push(...old.slice(oi, oi + part.value.length));
+        oi += part.value.length;
+      }
+      if (part.added) {
+        newRun.push(...now.slice(ni, ni + part.value.length));
+        ni += part.value.length;
+      }
+    }
+  }
+  flush();
+  function merge(target, extra) {
+    target.from = Math.min(target.from, extra.from);
+    target.to = Math.max(target.to, extra.to);
+    target.oldFrom = Math.min(target.oldFrom, extra.oldFrom);
+    target.oldTo = Math.max(target.oldTo, extra.oldTo);
+    target.removed = base.slice(target.oldFrom, target.oldTo);
+    target.added = current.slice(target.from, target.to);
+    target.anchor = Math.max(target.anchor, target.to);
+  }
+  const removed = /* @__PURE__ */ new Set();
+  for (const item of pending.filter((p) => p.kind === "separator")) {
+    const a = item.area;
+    const neighbour = pending.find((p) => p.kind === "insert" && a.to === p.area.from && a.oldTo === p.area.oldFrom) ?? pending.find((p) => p.kind === "delete" && a.to === p.area.from && a.oldTo === p.area.oldFrom);
+    const target = neighbour ?? pending.find((p) => p.kind === "body" && p.paragraph === item.paragraph);
+    if (target) {
+      merge(target.area, a);
+      removed.add(item);
+    }
+  }
+  return pending.filter((p) => !removed.has(p)).map((p) => p.area).sort((a, b) => a.from - b.from || a.oldFrom - b.oldFrom);
 }
 
 // src/area-history.ts
 function areaRange(text, area) {
+  if (area.paragraphFrom !== void 0 && area.paragraphTo !== void 0 && area.paragraphFrom >= 0 && area.paragraphTo >= area.paragraphFrom && area.paragraphTo <= text.length) return { from: area.paragraphFrom, to: area.paragraphTo };
   if (area.from === area.to) return { from: area.from, to: area.to };
   let from = 0;
   const separators = /\r?\n[\t ]*\r?\n/g;
@@ -693,7 +783,7 @@ function mapAreaRange(newer, older, range) {
   for (const c of edits) {
     const crossesStart = c.oldFrom < range.from && c.oldTo > range.from && newer.slice(c.oldFrom, range.from).trim() !== "";
     const crossesEnd = c.oldFrom < range.to && c.oldTo > range.to && newer.slice(range.to, c.oldTo).trim() !== "";
-    if (crossesStart || crossesEnd) return { reason: "An earlier rewrite also changed surrounding text. Its area cannot be isolated safely." };
+    if ((crossesStart || crossesEnd) && c.added.trim() !== "") return { reason: "An earlier rewrite also changed surrounding text. Its area cannot be isolated safely." };
   }
   function position(offset, side) {
     let delta = 0;
@@ -737,18 +827,20 @@ function mapAreaRange(newer, older, range) {
   }
   if (from > to) return { reason: "The older area boundary is ambiguous." };
   const currentText = newer.slice(range.from, range.to), oldText = older.slice(from, to);
+  if (paragraphs(currentText).filter((p) => p.body.trim()).length <= 1 && range.from < range.to && paragraphs(oldText).filter((p) => p.body.trim()).length > 1) return { reason: "This earlier version split or joined the paragraph. Its text cannot be isolated safely." };
   const overlaps = edits.some((c) => c.oldFrom < range.to && c.oldTo > range.from);
   const repeated = (document2, value) => !!value && document2.indexOf(value) !== document2.lastIndexOf(value);
-  if (overlaps && (repeated(newer, currentText) || repeated(older, oldText))) return { reason: "Repeated text makes this earlier area ambiguous. Use the full-note history to compare it." };
+  if (overlaps && oldText && (repeated(newer, currentText) || repeated(older, oldText))) return { reason: "Repeated text makes this earlier area ambiguous. Use the full-note history to compare it." };
   return { range: { from, to } };
 }
 var AreaHistory = class {
-  constructor(source, path3, text, currentRange) {
+  constructor(source, path3, text, currentRange, origin) {
     this.source = source;
     this.currentRange = currentRange;
     this.docId = source.get(path3)?.docId;
     this.document = text;
     this.range = { ...currentRange };
+    if (currentRange.from === currentRange.to && origin) this.deletionOrigin = origin;
     this.entries = [{ text: text.slice(currentRange.from, currentRange.to), kind: "current" }];
     if (!this.docId) {
       this.finished = true;
@@ -764,6 +856,7 @@ var AreaHistory = class {
   names;
   cursor = 0;
   docId;
+  deletionOrigin;
   get selected() {
     return this.entries[this.position];
   }
@@ -790,12 +883,14 @@ var AreaHistory = class {
       this.cursor++;
       if (!keepReading()) return this.selected;
       if (revision.content === this.document) continue;
-      const mapped = mapAreaRange(this.document, revision.content, this.range);
+      const mapped = mapAreaRange(this.deletionOrigin?.document ?? this.document, revision.content, this.deletionOrigin?.range ?? this.range);
       if (!mapped.range) {
         this.finished = true;
         this.stopReason = mapped.reason;
         return this.selected;
       }
+      if (this.deletionOrigin && mapped.range.from === mapped.range.to) continue;
+      this.deletionOrigin = void 0;
       this.document = revision.content;
       this.range = mapped.range;
       const text = revision.content.slice(this.range.from, this.range.to);
@@ -983,7 +1078,8 @@ var ReviewBox = class extends import_view.WidgetType {
     const accept = addButton("Accept", "accept", () => decide(true));
     accept.classList.add("tc-inline-accept");
     const reject = addButton("Reject", "reject", () => decide(false));
-    const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area));
+    const origin = this.area.paragraphFrom === void 0 && this.area.from === this.area.to ? { document: this.base, range: { from: this.area.oldFrom, to: this.area.oldTo } } : void 0;
+    const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area), origin);
     const section = document.createElement("div");
     section.className = "tc-area-history";
     card.appendChild(section);
@@ -1085,16 +1181,15 @@ function reviewExtension(host) {
     const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, base = path3 ? host.archive.get(path3)?.baseline : void 0;
     const text = state.doc.toString(), enabled = host.settings.highlights;
     const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled;
-    const raw = unchanged ? previous.raw : enabled && base !== void 0 && text.length + base.length <= 15e4 ? changes(base, text, true) : [];
-    const areas = unchanged ? previous.areas : base !== void 0 ? reviewAreas(base, text, raw) : [];
+    const areas = unchanged ? previous.areas : enabled && base !== void 0 && text.length + base.length <= 15e4 ? reviewAreas(base, text) : [];
+    const raw = unchanged ? previous.raw : areas.flatMap((area, areaIndex) => changes(area.removed, area.added, true).map((c) => ({ ...c, from: c.from + area.from, to: c.to + area.from, oldFrom: c.oldFrom + area.oldFrom, oldTo: c.oldTo + area.oldFrom, areaIndex })));
     const hovered = unchanged && requested !== null && areas[requested] ? requested : null;
     const preview2 = unchanged && hovered !== null && requestedPreview?.index === hovered && requestedPreview.path === path3 && requestedPreview.original === text && requestedPreview.base === base && requestedPreview.range.from >= 0 && requestedPreview.range.to <= text.length && requestedPreview.range.to >= requestedPreview.range.from ? requestedPreview : null;
     if (unchanged && previous.hovered === hovered && samePreview(previous.preview, preview2)) return previous;
     const ranges = [];
     if (path3 && base !== void 0 && areas.length) {
-      let areaIndex = 0;
       for (const c of raw) {
-        while (areaIndex < areas.length - 1 && c.from > areas[areaIndex].to) areaIndex++;
+        const areaIndex = c.areaIndex;
         if (preview2 && areaIndex === preview2.index) continue;
         if (c.removed) ranges.push(import_view.Decoration.widget({ widget: new DeletedText(c.removed, areaIndex), side: -1 }).range(c.from));
         if (c.to > c.from) ranges.push(import_view.Decoration.mark({ class: "tc-addition", attributes: { "data-tc-area": String(areaIndex) } }).range(c.from, c.to));

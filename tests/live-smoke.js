@@ -148,8 +148,12 @@
     hover(0);assert(cards().length===1,'Hovering deleted text opens controls even when the note is empty');
     action(0,'previous');await waitFor(()=>!!areaPreview()?.textContent,'A deleted note can preview its earlier text at its original insertion point');
     assert(cm.state.doc.length===0,'Previewing deleted text keeps the current empty document unchanged');
+    assert(!previewText().includes('A second paragraph')&&!previewText().includes('The final paragraph'),'A deleted paragraph preview does not include other deleted paragraphs');
     action(0,'cancel-preview');assert(!areaPreview()&&cm.state.doc.length===0,'Cancelling a deleted-text preview restores the empty current display');
-    action(0,'reject');await waitFor(()=>cards().length===0&&cm.state.doc.toString()===acceptedText,'Rejecting a complete deletion restores all accepted text');
+    action(0,'reject');await waitFor(()=>cm.state.doc.length>0,'One deleted paragraph can be restored independently');
+    assert(!cm.state.doc.toString().includes('A second paragraph')&&!cm.state.doc.toString().includes('The final paragraph'),'Restoring one deleted paragraph leaves the others deleted');
+    for(let i=0;i<2;i++){const before=cm.state.doc.toString();action(0,'reject');await waitFor(()=>cm.state.doc.toString()!==before,'The next deleted paragraph can be restored independently');}
+    assert(cm.state.doc.toString()===acceptedText,'Restoring deleted paragraphs individually reconstructs the accepted text');
     cm.dispatch({changes:{from:cm.state.doc.length,insert:'\n\nA newly inserted paragraph.'}});
     hover(0);
     assert(cards().length===1&&cards()[0].querySelector('.tc-inline-title').textContent==='Added text','A pure insertion receives its own review box');
@@ -158,6 +162,20 @@
     const latestText=cm.state.doc.toString();detachedAccept.click();await new Promise(r=>setTimeout(r,30));
     assert(instance.archive.get('inline-fixture.md').baseline===acceptedText&&cm.state.doc.toString()===latestText,'A stale detached review button cannot accept or rewrite newer text');
     action(0,'accept');await waitFor(()=>cards().length===0,'Accepting an inserted paragraph resolves its review box');
+    await instance.flushAll();
+    await instance.capture('inline-fixture.md','','accept',{baseline:''});
+    const pasted='First pasted paragraph.\n\nSecond pasted paragraph.\n\nThird pasted paragraph.';
+    cm.dispatch({changes:{from:0,to:cm.state.doc.length,insert:pasted}});await instance.flushAll();
+    const paragraphIds=new Set(Array.from(mount.querySelectorAll('.tc-addition[data-tc-area]')).map(el=>el.dataset.tcArea));
+    assert(paragraphIds.size===3,'One multi-paragraph paste creates three independently hoverable areas');
+    action(1,'previous');await waitFor(()=>!!areaPreview()&&previewText()==='','The pasted middle paragraph can preview its own absence');
+    assert(previewCurrentText()==='Second pasted paragraph.'&&cm.state.doc.toString()===pasted,'The middle paragraph preview excludes both neighbours and leaves the document unchanged');
+    assert(mount.querySelector('.tc-addition[data-tc-area="0"]')?.textContent.includes('First pasted')&&mount.querySelector('.tc-addition[data-tc-area="2"]')?.textContent.includes('Third pasted'),'Neighbouring paragraphs keep their own highlights while the middle is previewed');
+    action(1,'cancel-preview');action(1,'reject');
+    await waitFor(()=>cm.state.doc.toString()==='First pasted paragraph.\n\nThird pasted paragraph.','Rejecting the middle pasted paragraph preserves both neighbours');
+    action(0,'accept');await waitFor(()=>instance.archive.get('inline-fixture.md').baseline==='First pasted paragraph.\n\n','Accepting one pasted paragraph leaves the other pending');
+    assert(cm.state.doc.toString()==='First pasted paragraph.\n\nThird pasted paragraph.','Accepting one paragraph does not edit the other paragraph');
+    action(0,'reject');await waitFor(()=>cm.state.doc.toString()==='First pasted paragraph.\n\n','The final pending paragraph can be rejected independently');
     await instance.flushAll();
   } finally {cm?.destroy();mount.remove();}
   await instance.archive.idle();
