@@ -4,10 +4,11 @@ import {diffWordsWithSpace} from 'diff';
 import path from 'node:path';
 import os from 'node:os';
 import {Archive,Revision} from './storage';
-import {acceptOne,Change,rejectOne} from './changes';
+import {Change,rejectOne} from './changes';
 import {reviewExtension} from './inline-review';
-import {reviewAreas} from './review-areas';
+import {acceptReviewArea,reviewAreas} from './review-areas';
 import {TextRange} from './area-history';
+import {repairAcceptedHistory} from './acceptance-repair';
 
 const VIEW='track-changes-review';
 // Obsidian does not await unload hooks. Share the final flush promise across
@@ -101,7 +102,7 @@ export default class TrackChanges extends Plugin {
     if(this.current(notePath)!==expected||this.archive.get(notePath)?.baseline!==base)throw Error('The note changed while reviewing. Refresh and try again.');
     await this.flushPath(notePath);
     if(this.current(notePath)!==expected||this.archive.get(notePath)?.baseline!==base)throw Error('The note changed while saving. Refresh and try again.');
-    if(accept){await this.capture(notePath,expected,'accept',{baseline:change?acceptOne(base,change):expected});}
+    if(accept){await this.capture(notePath,expected,'accept',{baseline:change?acceptReviewArea(base,expected,change):expected});}
     else {
       const next=change?rejectOne(expected,change):base;
       await this.replaceSafely(notePath,expected,next,'reject');
@@ -120,6 +121,18 @@ export default class TrackChanges extends Plugin {
     if(range.from<0||range.to<range.from||range.to>expected.length)throw Error('Invalid area boundary.');
     const next=expected.slice(0,range.from)+text+expected.slice(range.to);
     await this.replaceSafely(notePath,expected,next,'restore-area');this.refreshEditors();this.refreshViews();
+  }
+  async repairAcceptedBoundaries(notePath:string){
+    await this.flushPath(notePath);
+    const latest=this.archive.get(notePath);if(!latest)return {repaired:0};
+    const expected=this.current(notePath),baseline=latest.baseline,records:Revision[]=[];
+    for(const name of (await this.archive.list(latest.docId)).reverse())records.push(await this.archive.load(latest.docId,name));
+    const repair=repairAcceptedHistory(records);if(repair.baseline===undefined)return repair;
+    if(this.current(notePath)!==expected||this.archive.get(notePath)?.baseline!==baseline)throw Error('The note changed during repair. No accepted state was replaced.');
+    await this.capture(notePath,expected,'before-accept-boundary-repair');
+    if(this.current(notePath)!==expected||this.archive.get(notePath)?.baseline!==baseline)throw Error('The note changed during repair. No accepted state was replaced.');
+    await this.capture(notePath,expected,'repair-accepted-boundaries',{baseline:repair.baseline});
+    return {repaired:repair.repaired,noteTextUnchanged:this.current(notePath)===expected};
   }
   async recoverCopy(revision:Revision){
     const basename=revision.path.split('/').pop()?.replace(/\.md$/i,'')||'Recovered note';

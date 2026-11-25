@@ -758,7 +758,24 @@ function reviewAreas(base, current) {
       removed.add(item);
     }
   }
-  return pending.filter((p) => !removed.has(p)).map((p) => p.area).sort((a, b) => a.from - b.from || a.oldFrom - b.oldFrom);
+  return pending.filter((p) => !removed.has(p)).map((p) => ({ ...p.area, operation: p.kind })).sort((a, b) => a.from - b.from || a.oldFrom - b.oldFrom);
+}
+function acceptReviewArea(base, current, change) {
+  const area = change;
+  if (area.operation !== "insert" || !area.added.trim()) return acceptOne(base, area);
+  const before = base.slice(0, area.oldFrom), after = base.slice(area.oldTo);
+  let added = area.added;
+  const separates = (left, right) => /\r?\n[\t ]*\r?\n/.test((left.match(/[\t \r\n]*$/)?.[0] ?? "") + (right.match(/^[\t \r\n]*/)?.[0] ?? ""));
+  const separator = /\r?\n[\t ]*\r?\n(?:[\t ]*\r?\n)*/;
+  if (before.trim() && !separates(before, added)) {
+    const prefix = current.slice(0, area.paragraphFrom ?? area.from).match(/\r?\n[\t ]*\r?\n(?:[\t ]*\r?\n)*$/)?.[0] ?? "\n\n";
+    added = prefix + added;
+  }
+  if (after.trim() && !separates(added, after)) {
+    const suffix = current.slice(area.paragraphTo ?? area.to).match(separator)?.[0] ?? "\n\n";
+    added += suffix;
+  }
+  return before + added + after;
 }
 
 // src/area-history.ts
@@ -1309,6 +1326,43 @@ function reviewExtension(host) {
   return [field, capture];
 }
 
+// src/acceptance-repair.ts
+function repairAcceptedHistory(records) {
+  let corrected, repaired = 0;
+  for (let i = 1; i < records.length; i++) {
+    const before = records[i - 1], after = records[i];
+    if (before.baseline === after.baseline) continue;
+    if (after.kind === "repair-accepted-boundaries" || after.kind === "accept" && after.baseline === after.content) {
+      corrected = void 0;
+      repaired = 0;
+      continue;
+    }
+    if (after.kind !== "accept") {
+      if (corrected !== void 0) return { repaired: 0, reason: "A later baseline change cannot be replayed safely." };
+      continue;
+    }
+    const actions = reviewAreas(before.baseline, after.content).filter((area) => acceptOne(before.baseline, area) === after.baseline);
+    if (actions.length !== 1 || actions[0].operation !== "insert") {
+      if (corrected !== void 0) return { repaired: 0, reason: "A later Accept action is ambiguous." };
+      continue;
+    }
+    const action = actions[0], fixed = acceptReviewArea(before.baseline, after.content, action);
+    if (corrected === void 0) {
+      if (fixed !== after.baseline) {
+        corrected = fixed;
+        repaired++;
+      }
+      continue;
+    }
+    const candidates = reviewAreas(corrected, after.content).filter((area) => area.paragraphFrom === action.paragraphFrom && area.paragraphTo === action.paragraphTo);
+    if (candidates.length > 1) return { repaired: 0, reason: "A replayed paragraph has more than one decision." };
+    if (candidates.length) corrected = acceptReviewArea(corrected, after.content, candidates[0]);
+    if (fixed !== after.baseline) repaired++;
+  }
+  const latest = records.at(-1);
+  return corrected !== void 0 && latest && corrected !== latest.baseline ? { baseline: corrected, repaired } : { repaired: 0 };
+}
+
 // src/main.ts
 var VIEW = "track-changes-review";
 var handoffKey = Symbol.for("obsidian-track-changes.archive-handoffs");
@@ -1536,7 +1590,7 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     await this.flushPath(notePath);
     if (this.current(notePath) !== expected || this.archive.get(notePath)?.baseline !== base) throw Error("The note changed while saving. Refresh and try again.");
     if (accept) {
-      await this.capture(notePath, expected, "accept", { baseline: change ? acceptOne(base, change) : expected });
+      await this.capture(notePath, expected, "accept", { baseline: change ? acceptReviewArea(base, expected, change) : expected });
     } else {
       const next = change ? rejectOne(expected, change) : base;
       await this.replaceSafely(notePath, expected, next, "reject");
@@ -1568,6 +1622,20 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     await this.replaceSafely(notePath, expected, next, "restore-area");
     this.refreshEditors();
     this.refreshViews();
+  }
+  async repairAcceptedBoundaries(notePath) {
+    await this.flushPath(notePath);
+    const latest = this.archive.get(notePath);
+    if (!latest) return { repaired: 0 };
+    const expected = this.current(notePath), baseline = latest.baseline, records = [];
+    for (const name of (await this.archive.list(latest.docId)).reverse()) records.push(await this.archive.load(latest.docId, name));
+    const repair = repairAcceptedHistory(records);
+    if (repair.baseline === void 0) return repair;
+    if (this.current(notePath) !== expected || this.archive.get(notePath)?.baseline !== baseline) throw Error("The note changed during repair. No accepted state was replaced.");
+    await this.capture(notePath, expected, "before-accept-boundary-repair");
+    if (this.current(notePath) !== expected || this.archive.get(notePath)?.baseline !== baseline) throw Error("The note changed during repair. No accepted state was replaced.");
+    await this.capture(notePath, expected, "repair-accepted-boundaries", { baseline: repair.baseline });
+    return { repaired: repair.repaired, noteTextUnchanged: this.current(notePath) === expected };
   }
   async recoverCopy(revision) {
     const basename = revision.path.split("/").pop()?.replace(/\.md$/i, "") || "Recovered note";

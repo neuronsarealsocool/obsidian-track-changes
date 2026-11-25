@@ -1,8 +1,8 @@
 import {diffArrays} from 'diff';
-import {Change,changes} from './changes';
+import {Change,acceptOne,changes} from './changes';
 import {Paragraph,paragraphs} from './paragraphs';
 
-export interface ReviewArea extends Change {anchor:number;paragraphFrom?:number;paragraphTo?:number;oldParagraphFrom?:number;oldParagraphTo?:number}
+export interface ReviewArea extends Change {anchor:number;paragraphFrom?:number;paragraphTo?:number;oldParagraphFrom?:number;oldParagraphTo?:number;operation?:'body'|'separator'|'insert'|'delete'}
 interface Pending {area:ReviewArea;kind:'body'|'separator'|'insert'|'delete';paragraph?:number}
 
 /** Align paragraphs first. Word diffs cannot cross current paragraph bodies. */
@@ -55,5 +55,26 @@ export function reviewAreas(base:string,current:string):ReviewArea[]{
     const target=neighbour??pending.find(p=>p.kind==='body'&&p.paragraph===item.paragraph);
     if(target){merge(target.area,a);removed.add(item);}
   }
-  return pending.filter(p=>!removed.has(p)).map(p=>p.area).sort((a,b)=>a.from-b.from||a.oldFrom-b.oldFrom);
+  return pending.filter(p=>!removed.has(p)).map(p=>({...p.area,operation:p.kind})).sort((a,b)=>a.from-b.from||a.oldFrom-b.oldFrom);
+}
+
+/** A paragraph can be accepted before an earlier insertion is accepted. Keep
+ * its own boundaries even when the separator was assigned to that earlier
+ * insertion in the complete diff. Never modify the current note. */
+export function acceptReviewArea(base:string,current:string,change:Change):string{
+  const area=change as ReviewArea;
+  if(area.operation!=='insert'||!area.added.trim())return acceptOne(base,area);
+  const before=base.slice(0,area.oldFrom),after=base.slice(area.oldTo);
+  let added=area.added;
+  const separates=(left:string,right:string)=>/\r?\n[\t ]*\r?\n/.test((left.match(/[\t \r\n]*$/)?.[0]??'')+(right.match(/^[\t \r\n]*/)?.[0]??''));
+  const separator=/\r?\n[\t ]*\r?\n(?:[\t ]*\r?\n)*/;
+  if(before.trim()&&!separates(before,added)){
+    const prefix=current.slice(0,area.paragraphFrom??area.from).match(/\r?\n[\t ]*\r?\n(?:[\t ]*\r?\n)*$/)?.[0]??'\n\n';
+    added=prefix+added;
+  }
+  if(after.trim()&&!separates(added,after)){
+    const suffix=current.slice(area.paragraphTo??area.to).match(separator)?.[0]??'\n\n';
+    added+=suffix;
+  }
+  return before+added+after;
 }

@@ -38,6 +38,8 @@ For a manual installation, create `.obsidian/plugins/track-changes/` inside your
 
 The review boxes and tracked highlights are editor decorations: they are never inserted into your Markdown or included in copies of its text. Reading view and published notes show the actual document text. Toggle **Inline highlights and review boxes** in settings to hide or show both.
 
+Accepting inserted paragraphs in any order preserves their blank-line boundaries in the accepted version. Version 0.5.1 fixes an earlier bug where accepting a later insertion could join it to preceding accepted text, making the next comparison display a phantom red deletion. A repair helper can replay exactly identifiable insertion Accept actions from the archive; it saves the preceding accepted state, leaves the note text unchanged, and refuses ambiguous history.
+
 ## Storage and limits
 
 By default, archives live in `~/Obsidian Track Changes History/<vault-id>/`. Choose a different absolute directory in settings. Reload the plugin after a directory change; move the existing vault-id folder manually if you want to preserve continuity. Moving or renaming the vault itself changes its vault identifier; keep the old archive and migrate its subfolder if necessary.
