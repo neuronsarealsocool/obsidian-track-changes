@@ -10,6 +10,7 @@ import {reviewExtension} from './inline-review';
 import {acceptReviewArea} from './review-areas';
 import {TextRange} from './area-history';
 import {repairAcceptedHistory} from './acceptance-repair';
+import {MobileJournalReader, mobileTime} from './mobile-journal';
 
 const VIEW='track-changes-review';
 // Obsidian does not await unload hooks. Share the final flush promise across
@@ -23,6 +24,7 @@ export default class TrackChanges extends Plugin {
   archive!:Archive; ready=false; pending=new Map<string,Pending>();lastError='';private lastNotice=0;private stopped=false;
   private startupTimer?:number;private startup?:Promise<void>;
   private changingDirectory=false;
+  private mobileReader?:MobileJournalReader;private mobileImport?:Promise<void>;
   private settingsQueue:Promise<unknown>=Promise.resolve();
   async onload(){
     this.settings={...this.settings,...await this.loadData()};
@@ -35,6 +37,7 @@ export default class TrackChanges extends Plugin {
     this.addSettingTab(new TrackSettings(this.app,this));
     this.addRibbonIcon('history','Track Changes: browse revision history',()=>void this.openReview());
     this.addCommand({id:'review',name:'Browse revision history',callback:()=>void this.openReview()});
+    this.addCommand({id:'catch-up',name:'Catch up synced and offline history',callback:()=>void this.catchUp().catch(e=>this.report(e))});
     this.addCommand({id:'checkpoint',name:'Save a named checkpoint',editorCallback:(editor,view)=>{if(view.file)new NameModal(this.app,'Name this checkpoint',label=>this.capture(view.file!.path,editor.getValue(),'checkpoint',{label})).open();}});
     this.addCommand({id:'toggle-highlights',name:'Toggle inline revision markers',callback:()=>void this.updateSettings({highlights:!this.settings.highlights}).then(()=>{this.refreshEditors();new Notice(`Track Changes revision markers ${this.settings.highlights?'on':'off'}`);}).catch(error=>new Notice(String(error),9000))});
     this.addCommand({id:'toggle-red-deletions',name:'Toggle red for deletions',callback:()=>void this.setRedDeletions(!this.settings.redDeletions).then(()=>new Notice(`Red deletions ${this.settings.redDeletions?'on':'off'}`)).catch(error=>new Notice(String(error),9000))});
@@ -60,7 +63,10 @@ export default class TrackChanges extends Plugin {
     this.registerInterval(window.setInterval(()=>{void this.flushDue();status.setText(this.lastError?'Track Changes: storage error':`Track Changes: ${this.pending.size?'saving…':'tracking'}`);status.setAttribute('aria-label',this.lastError||'Local history enabled; no automatic expiry');},300));
     this.registerDomEvent(window,'blur',()=>void this.flushAll());
     // Register listeners before seeding, so edits during the initial scan are captured.
-    void this.seed().catch(e=>this.report(e));
+    this.mobileReader=new MobileJournalReader(this.app.vault.adapter,(file,error)=>console.warn('Track Changes: pending mobile record',file,error));
+    void this.catchUp().catch(e=>this.report(e));
+    this.registerInterval(window.setInterval(()=>{void this.importMobile().catch(e=>this.report(e));},15000));
+    this.registerDomEvent(window,'focus',()=>void this.catchUp().catch(e=>this.report(e)));
     this.refreshEditors();this.refreshViews();
   }
   report(error:unknown){console.error('Track Changes',error);this.lastError=String(error);if(Date.now()-this.lastNotice>10000){new Notice(`Track Changes could not save history: ${String(error)}. Existing history was preserved.`,12000);this.lastNotice=Date.now();}}
@@ -113,6 +119,26 @@ export default class TrackChanges extends Plugin {
     // Notes removed while Obsidian was closed remain recoverable.
     for(const r of [...this.archive.docs.values()]){if(this.stopped)return;if(!r.deleted&&!this.app.vault.getAbstractFileByPath(r.path))await this.markDeleted(r.path);}
     this.refreshEditors();
+  }
+  async catchUp(){await this.importMobile();if(!this.stopped)await this.seed();}
+  async importMobile(){
+    if(this.mobileImport)return this.mobileImport;
+    if(!this.ready||this.stopped||!this.mobileReader||typeof this.app.vault.adapter.exists!=='function')return;
+    this.mobileImport=(async()=>{
+      const records=await this.mobileReader!.readAll();if(this.stopped)return;await this.flushAll();
+      let imported=false;
+      for(const record of records){
+        if(this.stopped)return;if(!record.path.toLowerCase().endsWith('.md'))continue;
+        let old=this.archive.get(record.path)??[...this.archive.docs.values()].find(r=>r.path===record.path);
+        const source={id:record.id,deviceId:record.deviceId,capturedAt:record.capturedAt,modifiedAt:record.modifiedAt,day:record.day,basis:record.basis};
+        if(!old&&record.kind==='edit')old=await this.archive.save(record.path,record.previousContent!,'mobile-baseline',{source:{...source,id:record.id+':before'},label:'Android: version before recorded edit'});
+        const result=await this.archive.save(record.path,record.content,'mobile-'+record.kind,{...(old?{docId:old.docId}:{}),source,label:`Android ${new Date(mobileTime(record)).toLocaleString()} (${record.basis})`});
+        if(result!==old)imported=true;
+      }
+      // A journal can arrive after the note. Never leave an imported old version as the active snapshot.
+      if(imported&&!this.stopped){await this.seed();this.refreshViews();}
+    })();
+    try{await this.mobileImport;}finally{this.mobileImport=undefined;}
   }
   async renamePath(oldPath:string,newPath:string){try{await this.flushPath(oldPath);const old=this.archive.get(oldPath);if(old)await this.capture(newPath,old.content,'rename',{docId:old.docId,oldPath});}catch(e){this.report(e);}}
   async rename(file:TFile,oldPath:string){await this.renamePath(oldPath,file.path);await this.captureDisk(file);}

@@ -1,5 +1,9 @@
 # Track Changes for Obsidian
 
+## Offline catch-up and Android recording (0.10.0)
+
+Startup reconciliation catches final synced note contents. The plugin also imports intermediate saved versions and source-date labels from the [standalone Android Note Version Recorder](https://github.com/neuronsarealsocool/note-version-recorder) through Resilio Sync. Imports preserve the accepted comparison baseline, ignore duplicate event IDs across restarts, and reconcile the active snapshot with the current note. See [setup and limitations](OFFLINE-HISTORY.txt).
+
 Keep a permanent local revision archive and browse the history of individual changed paragraphs. Old text appears struck through; current text keeps its normal appearance without addition underlines. Deletions are neutral by default, with optional red styling. Hover over changed text to reveal **This area's revisions**. Previous / Next revision preview older and newer text in the same area of the note. Choose Use this revision to keep a displayed version.
 
 ## Features

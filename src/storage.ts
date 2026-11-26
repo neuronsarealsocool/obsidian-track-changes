@@ -8,11 +8,13 @@ import {archiveDirectoryName,dateStamp,documentId,revisionName,revisionTime,safe
 export interface SavedArea {id:string;from:number;to:number;previousText:string}
 export interface AreaRestore {id:string;before:{from:number;to:number};after:{from:number;to:number};beforeRevisionId:string;previousText:string}
 export type AreaTransition=Omit<AreaRestore,'previousText'>;
-export interface Revision {schema:1;id:string;docId:string;time:string;path:string;aliases:string[];kind:string;content:string;baseline:string;deleted:boolean;label?:string;areaAnchors?:SavedArea[];areaRestore?:AreaRestore;areaChanges?:AreaTransition[]}
+export interface MobileSource {id:string;deviceId:string;capturedAt:string;modifiedAt:number;day:string;basis:string;}
+export interface Revision {schema:1;id:string;docId:string;time:string;path:string;aliases:string[];kind:string;content:string;baseline:string;deleted:boolean;label?:string;source?:MobileSource;areaAnchors?:SavedArea[];areaRestore?:AreaRestore;areaChanges?:AreaTransition[]}
 export class Archive {
   readonly docs=new Map<string,Revision>(); readonly active=new Map<string,string>();
   private queue:Promise<unknown>=Promise.resolve();
   private folders=new Map<string,string>();
+  private mobileIds=new Map<string,Set<string>>();
   constructor(public root:string,private vaultIdentity?:{id:string;name:string}){}
   static vaultId(vaultPath:string){return createHash('sha256').update(path.resolve(vaultPath).replaceAll('\\','/').toLowerCase()).digest('hex').slice(0,24);}
   private serial<T>(job:()=>Promise<T>):Promise<T>{const task=this.queue.then(job);this.queue=task.catch(()=>{});return task;}
@@ -31,7 +33,7 @@ export class Archive {
     }
     await fs.mkdir(this.root,{recursive:true});
     if(this.vaultIdentity){try{const metadata=JSON.parse(await fs.readFile(path.join(this.root,'.vault.json'),'utf8'));if(metadata.vaultId!==this.vaultIdentity.id)throw Error('This history folder belongs to a different vault.');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}}
-    this.docs.clear();this.active.clear();this.folders.clear();
+    this.docs.clear();this.active.clear();this.folders.clear();this.mobileIds.clear();
     const errors:string[]=[];
     for(const entry of await fs.readdir(this.root,{withFileTypes:true})){
       if(!entry.isDirectory()||!archiveDirectoryName(entry.name))continue;
@@ -92,9 +94,14 @@ export class Archive {
       if(target!==oldRoot){await fs.rename(oldRoot,target);this.root=target;}
     }
   }
-  save(notePath:string,content:string,kind='edit',options:{baseline?:string;label?:string;docId?:string;deleted?:boolean;oldPath?:string;areaRestore?:AreaRestore}={}){
+  save(notePath:string,content:string,kind='edit',options:{baseline?:string;label?:string;docId?:string;deleted?:boolean;oldPath?:string;areaRestore?:AreaRestore;source?:MobileSource}={}){
     return this.serial(async()=>{
       const old=options.docId?this.docs.get(options.docId):this.get(options.oldPath??notePath);
+      if(options.source&&old){
+        let ids=this.mobileIds.get(old.docId);
+        if(!ids){ids=new Set();for(const name of await this.list(old.docId)){const previous=await this.load(old.docId,name);if(previous.source)ids.add(previous.source.id);}this.mobileIds.set(old.docId,ids);}
+        if(ids.has(options.source.id))return old;
+      }
       const baseline=options.baseline??old?.baseline??content;
       if(old && old.content===content && old.baseline===baseline && old.path===notePath && old.deleted===(options.deleted??false) && kind==='edit')return old;
       const docId=old?.docId??randomUUID();
@@ -112,12 +119,13 @@ export class Archive {
         const restored=options.areaRestore;
         areaAnchors=[...(areaAnchors??[]).filter(area=>area.id!==restored.id),{id:restored.id,...restored.after,previousText:restored.previousText}];
       }
-      const r:Revision={schema:1,id,docId,time:new Date().toISOString(),path:notePath,aliases:[...new Set([...(old?.aliases??[]),notePath])],kind,content,baseline,deleted:options.deleted??false,...(options.label?{label:options.label}:{}),...(areaAnchors?{areaAnchors}:{}),...(options.areaRestore?{areaRestore:options.areaRestore}:{}),...(areaChanges.length?{areaChanges}:{})};
+      const r:Revision={schema:1,id,docId,time:new Date().toISOString(),path:notePath,aliases:[...new Set([...(old?.aliases??[]),notePath])],kind,content,baseline,deleted:options.deleted??false,...(options.source?{source:options.source}:{}),...(options.label?{label:options.label}:{}),...(areaAnchors?{areaAnchors}:{}),...(options.areaRestore?{areaRestore:options.areaRestore}:{}),...(areaChanges.length?{areaChanges}:{})};
       const folder=this.folders.get(docId)??await this.availableFolder(`${dateStamp(Number(id.split('-')[0]))} - ${safeName(notePath.split('/').pop()?.replace(/\.md$/i,'')??'Untitled')}`);
       const dir=path.join(this.root,folder);await fs.mkdir(dir,{recursive:true});
       const destination=path.join(dir,revisionName(id)),tmp=`${destination}.tmp`;
       const handle=await fs.open(tmp,'wx');try{await handle.writeFile(gzipSync(JSON.stringify(r)));await handle.sync();}finally{await handle.close();}
       await fs.rename(tmp,destination);
+      if(options.source){const ids=this.mobileIds.get(docId)??new Set<string>();ids.add(options.source.id);this.mobileIds.set(docId,ids);}
       this.folders.set(docId,folder);
       if(old)this.active.delete(old.path);
       this.docs.set(docId,r);if(!r.deleted)this.active.set(notePath,docId);return r;

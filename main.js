@@ -797,6 +797,7 @@ var Archive = class _Archive {
   active = /* @__PURE__ */ new Map();
   queue = Promise.resolve();
   folders = /* @__PURE__ */ new Map();
+  mobileIds = /* @__PURE__ */ new Map();
   static vaultId(vaultPath) {
     return (0, import_node_crypto.createHash)("sha256").update(import_node_path.default.resolve(vaultPath).replaceAll("\\", "/").toLowerCase()).digest("hex").slice(0, 24);
   }
@@ -839,6 +840,7 @@ var Archive = class _Archive {
     this.docs.clear();
     this.active.clear();
     this.folders.clear();
+    this.mobileIds.clear();
     const errors = [];
     for (const entry of await import_node_fs.promises.readdir(this.root, { withFileTypes: true })) {
       if (!entry.isDirectory() || !archiveDirectoryName(entry.name)) continue;
@@ -970,6 +972,18 @@ var Archive = class _Archive {
   save(notePath, content, kind = "edit", options = {}) {
     return this.serial(async () => {
       const old = options.docId ? this.docs.get(options.docId) : this.get(options.oldPath ?? notePath);
+      if (options.source && old) {
+        let ids = this.mobileIds.get(old.docId);
+        if (!ids) {
+          ids = /* @__PURE__ */ new Set();
+          for (const name of await this.list(old.docId)) {
+            const previous = await this.load(old.docId, name);
+            if (previous.source) ids.add(previous.source.id);
+          }
+          this.mobileIds.set(old.docId, ids);
+        }
+        if (ids.has(options.source.id)) return old;
+      }
       const baseline = options.baseline ?? old?.baseline ?? content;
       if (old && old.content === content && old.baseline === baseline && old.path === notePath && old.deleted === (options.deleted ?? false) && kind === "edit") return old;
       const docId = old?.docId ?? (0, import_node_crypto.randomUUID)();
@@ -988,7 +1002,7 @@ var Archive = class _Archive {
         const restored = options.areaRestore;
         areaAnchors = [...(areaAnchors ?? []).filter((area) => area.id !== restored.id), { id: restored.id, ...restored.after, previousText: restored.previousText }];
       }
-      const r = { schema: 1, id, docId, time: (/* @__PURE__ */ new Date()).toISOString(), path: notePath, aliases: [.../* @__PURE__ */ new Set([...old?.aliases ?? [], notePath])], kind, content, baseline, deleted: options.deleted ?? false, ...options.label ? { label: options.label } : {}, ...areaAnchors ? { areaAnchors } : {}, ...options.areaRestore ? { areaRestore: options.areaRestore } : {}, ...areaChanges.length ? { areaChanges } : {} };
+      const r = { schema: 1, id, docId, time: (/* @__PURE__ */ new Date()).toISOString(), path: notePath, aliases: [.../* @__PURE__ */ new Set([...old?.aliases ?? [], notePath])], kind, content, baseline, deleted: options.deleted ?? false, ...options.source ? { source: options.source } : {}, ...options.label ? { label: options.label } : {}, ...areaAnchors ? { areaAnchors } : {}, ...options.areaRestore ? { areaRestore: options.areaRestore } : {}, ...areaChanges.length ? { areaChanges } : {} };
       const folder = this.folders.get(docId) ?? await this.availableFolder(`${dateStamp(Number(id.split("-")[0]))} - ${safeName(notePath.split("/").pop()?.replace(/\.md$/i, "") ?? "Untitled")}`);
       const dir = import_node_path.default.join(this.root, folder);
       await import_node_fs.promises.mkdir(dir, { recursive: true });
@@ -1001,6 +1015,11 @@ var Archive = class _Archive {
         await handle.close();
       }
       await import_node_fs.promises.rename(tmp, destination);
+      if (options.source) {
+        const ids = this.mobileIds.get(docId) ?? /* @__PURE__ */ new Set();
+        ids.add(options.source.id);
+        this.mobileIds.set(docId, ids);
+      }
       this.folders.set(docId, folder);
       if (old) this.active.delete(old.path);
       this.docs.set(docId, r);
@@ -1624,6 +1643,65 @@ function repairAcceptedHistory(records) {
   return corrected !== void 0 && latest && corrected !== latest.baseline ? { baseline: corrected, repaired } : { repaired: 0 };
 }
 
+// src/mobile-journal.ts
+var JOURNAL_ROOT = "_mobile-edit-history";
+var uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+function isNotePath(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 2048 && !value.includes("\\") && !value.includes(":") && !/[\x00-\x1f]/.test(value) && value.split("/").every((p) => p !== "" && p !== "." && p !== ".." && !p.startsWith(".")) && value.split("/")[0] !== JOURNAL_ROOT;
+}
+function parseMobileRecord(text) {
+  if (text.length > 12 * 1024 * 1024) throw Error("Mobile record exceeds 12 MiB");
+  const r = JSON.parse(text);
+  if (r.schema !== 1 || !uuid.test(r.id) || !uuid.test(r.deviceId) || !isNotePath(r.path) || !["baseline", "edit"].includes(r.kind) || typeof r.content !== "string" || r.kind === "edit" && typeof r.previousContent !== "string" || typeof r.capturedAt !== "string" || !Number.isFinite(Date.parse(r.capturedAt)) || !Number.isFinite(r.modifiedAt) || r.modifiedAt < 0 || !["file-mtime", "observed"].includes(r.basis) || !Number.isInteger(r.offsetMinutes) || Math.abs(r.offsetMinutes) > 840 || !/^\d{4}-\d{2}-\d{2}$/.test(r.day))
+    throw Error("Invalid mobile history record");
+  const time = r.basis === "file-mtime" ? r.modifiedAt : Date.parse(r.capturedAt);
+  if (!Number.isFinite(time) || new Date(time + r.offsetMinutes * 6e4).toISOString().slice(0, 10) !== r.day)
+    throw Error("Mobile record date does not match its source timestamp");
+  return r;
+}
+function mobileTime(r) {
+  return r.basis === "file-mtime" ? r.modifiedAt : Date.parse(r.capturedAt);
+}
+var MobileJournalReader = class {
+  constructor(adapter, report = console.warn) {
+    this.adapter = adapter;
+    this.report = report;
+  }
+  cache = /* @__PURE__ */ new Map();
+  async readAll() {
+    const root = JOURNAL_ROOT + "/v1";
+    if (!await this.adapter.exists(root)) return [];
+    const files = [];
+    const listing = await this.adapter.list(root);
+    for (const folder of listing.folders) {
+      if (!folder.startsWith(root + "/") || !uuid.test(folder.slice(root.length + 1))) continue;
+      files.push(...(await this.adapter.list(folder)).files);
+    }
+    const result = /* @__PURE__ */ new Map();
+    for (const file of files.sort()) {
+      if (!file.endsWith(".json") || !file.startsWith(root + "/")) continue;
+      try {
+        const stat = await this.adapter.stat(file);
+        if (!stat || stat.size > 12 * 1024 * 1024) continue;
+        let cached = this.cache.get(file);
+        if (!cached || cached.mtime !== stat.mtime || cached.size !== stat.size) {
+          const record = parseMobileRecord(await this.adapter.read(file));
+          const parts = file.split("/");
+          if (parts[parts.length - 2] !== record.deviceId || parts[parts.length - 1] !== record.id + ".json")
+            throw Error("Mobile record identity does not match its filename");
+          cached = { mtime: stat.mtime, size: stat.size, record };
+          this.cache.set(file, cached);
+        }
+        result.set(cached.record.id, cached.record);
+      } catch (error) {
+        this.cache.delete(file);
+        this.report(file, error);
+      }
+    }
+    return [...result.values()].sort((a, b) => mobileTime(a) - mobileTime(b) || a.capturedAt.localeCompare(b.capturedAt) || a.id.localeCompare(b.id));
+  }
+};
+
 // src/main.ts
 var VIEW = "track-changes-review";
 var handoffKey = Symbol.for("obsidian-track-changes.archive-handoffs");
@@ -1639,6 +1717,8 @@ var TrackChanges = class extends import_obsidian2.Plugin {
   startupTimer;
   startup;
   changingDirectory = false;
+  mobileReader;
+  mobileImport;
   settingsQueue = Promise.resolve();
   async onload() {
     this.settings = { ...this.settings, ...await this.loadData() };
@@ -1651,6 +1731,7 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     this.addSettingTab(new TrackSettings(this.app, this));
     this.addRibbonIcon("history", "Track Changes: browse revision history", () => void this.openReview());
     this.addCommand({ id: "review", name: "Browse revision history", callback: () => void this.openReview() });
+    this.addCommand({ id: "catch-up", name: "Catch up synced and offline history", callback: () => void this.catchUp().catch((e) => this.report(e)) });
     this.addCommand({ id: "checkpoint", name: "Save a named checkpoint", editorCallback: (editor, view) => {
       if (view.file) new NameModal(this.app, "Name this checkpoint", (label) => this.capture(view.file.path, editor.getValue(), "checkpoint", { label })).open();
     } });
@@ -1714,7 +1795,12 @@ var TrackChanges = class extends import_obsidian2.Plugin {
       status.setAttribute("aria-label", this.lastError || "Local history enabled; no automatic expiry");
     }, 300));
     this.registerDomEvent(window, "blur", () => void this.flushAll());
-    void this.seed().catch((e) => this.report(e));
+    this.mobileReader = new MobileJournalReader(this.app.vault.adapter, (file, error) => console.warn("Track Changes: pending mobile record", file, error));
+    void this.catchUp().catch((e) => this.report(e));
+    this.registerInterval(window.setInterval(() => {
+      void this.importMobile().catch((e) => this.report(e));
+    }, 15e3));
+    this.registerDomEvent(window, "focus", () => void this.catchUp().catch((e) => this.report(e)));
     this.refreshEditors();
     this.refreshViews();
   }
@@ -1832,6 +1918,38 @@ var TrackChanges = class extends import_obsidian2.Plugin {
       if (!r.deleted && !this.app.vault.getAbstractFileByPath(r.path)) await this.markDeleted(r.path);
     }
     this.refreshEditors();
+  }
+  async catchUp() {
+    await this.importMobile();
+    if (!this.stopped) await this.seed();
+  }
+  async importMobile() {
+    if (this.mobileImport) return this.mobileImport;
+    if (!this.ready || this.stopped || !this.mobileReader || typeof this.app.vault.adapter.exists !== "function") return;
+    this.mobileImport = (async () => {
+      const records = await this.mobileReader.readAll();
+      if (this.stopped) return;
+      await this.flushAll();
+      let imported = false;
+      for (const record of records) {
+        if (this.stopped) return;
+        if (!record.path.toLowerCase().endsWith(".md")) continue;
+        let old = this.archive.get(record.path) ?? [...this.archive.docs.values()].find((r) => r.path === record.path);
+        const source = { id: record.id, deviceId: record.deviceId, capturedAt: record.capturedAt, modifiedAt: record.modifiedAt, day: record.day, basis: record.basis };
+        if (!old && record.kind === "edit") old = await this.archive.save(record.path, record.previousContent, "mobile-baseline", { source: { ...source, id: record.id + ":before" }, label: "Android: version before recorded edit" });
+        const result = await this.archive.save(record.path, record.content, "mobile-" + record.kind, { ...old ? { docId: old.docId } : {}, source, label: `Android ${new Date(mobileTime(record)).toLocaleString()} (${record.basis})` });
+        if (result !== old) imported = true;
+      }
+      if (imported && !this.stopped) {
+        await this.seed();
+        this.refreshViews();
+      }
+    })();
+    try {
+      await this.mobileImport;
+    } finally {
+      this.mobileImport = void 0;
+    }
   }
   async renamePath(oldPath, newPath) {
     try {
