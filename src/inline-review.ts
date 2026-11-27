@@ -5,6 +5,7 @@ import {Change,changes} from './changes';
 import {ReviewArea,historyReviewAreas} from './review-areas';
 import type {SavedArea} from './storage';
 import {AreaHistory,AreaHistorySource,areaRange,mapAreaRange,TextRange} from './area-history';
+import {styleDeletion} from './deletion-style';
 
 interface ReviewHost {
   settings:{highlights:boolean;redDeletions?:boolean};
@@ -16,8 +17,8 @@ interface ReviewHost {
 interface InPlacePreview {path:string;base:string;original:string;index:number;range:TextRange;text:string}
 type SetPreview=(view:EditorView,preview:InPlacePreview|null)=>void;
 class HistoricalText extends WidgetType {
-  constructor(readonly text:string,readonly current:string,readonly index:number){super();}
-  eq(other:HistoricalText){return this.text===other.text&&this.current===other.current&&this.index===other.index;}
+  constructor(readonly text:string,readonly current:string,readonly index:number,readonly red:boolean){super();}
+  eq(other:HistoricalText){return this.text===other.text&&this.current===other.current&&this.index===other.index&&this.red===other.red;}
   toDOM(){
     const el=document.createElement('span');el.className='tc-inplace-preview';el.dataset.tcArea=String(this.index);el.contentEditable='false';
     el.setAttribute('aria-label','Temporary historical revision preview');el.setAttribute('role','note');
@@ -25,7 +26,7 @@ class HistoricalText extends WidgetType {
     let offset=0;
     for(const change of changes(this.current,this.text,true)){
       text.appendChild(document.createTextNode(this.current.slice(offset,change.oldFrom)));
-      if(change.removed){const removed=document.createElement('del');removed.className='tc-preview-deletion tc-deletion';removed.textContent=change.removed;removed.setAttribute('aria-label',`Current text removed in this preview: ${change.removed}`);text.appendChild(removed);}
+      if(change.removed){const removed=document.createElement('del');removed.className='tc-preview-deletion tc-deletion';styleDeletion(removed,this.red);removed.textContent=change.removed;removed.setAttribute('aria-label',`Current text removed in this preview: ${change.removed}`);text.appendChild(removed);}
       if(change.added){const added=document.createElement('ins');added.className='tc-preview-addition tc-addition';added.textContent=change.added;added.setAttribute('aria-label',`Selected revision text: ${change.added}`);text.appendChild(added);}
       offset=change.oldTo;
     }
@@ -36,9 +37,9 @@ class HistoricalText extends WidgetType {
   ignoreEvent(){return true;}
 }
 class DeletedText extends WidgetType {
-  constructor(readonly text:string,readonly areaIndex:number){super();}
-  eq(other:DeletedText){return other.text===this.text&&other.areaIndex===this.areaIndex;}
-  toDOM(){const span=document.createElement('span');span.className='tc-deletion';span.textContent=this.text;span.dataset.tcArea=String(this.areaIndex);span.setAttribute('aria-label',`Deleted: ${this.text}`);return span;}
+  constructor(readonly text:string,readonly areaIndex:number,readonly red:boolean){super();}
+  eq(other:DeletedText){return other.text===this.text&&other.areaIndex===this.areaIndex&&other.red===this.red;}
+  toDOM(){const span=document.createElement('span');span.className='tc-deletion';styleDeletion(span,this.red);span.textContent=this.text;span.dataset.tcArea=String(this.areaIndex);span.setAttribute('aria-label',`Deleted: ${this.text}`);return span;}
 }
 class EmptyAreaHistory extends WidgetType {
   constructor(readonly areaIndex:number){super();}
@@ -131,12 +132,12 @@ export function reviewExtension(host:ReviewHost){
       for(const c of raw){
         const areaIndex=c.areaIndex;
         if(preview&&areaIndex===preview.index)continue;
-        if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed,areaIndex),side:-1}).range(c.from));
+        if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed,areaIndex,red),side:-1}).range(c.from));
         if(c.to>c.from)ranges.push(Decoration.mark({class:'tc-addition',attributes:{'data-tc-area':String(areaIndex)}}).range(c.from,c.to));
       }
       if(preview){
         const {from,to}=preview.range;
-        const widget=new HistoricalText(preview.text,preview.original.slice(from,to),preview.index);
+        const widget=new HistoricalText(preview.text,preview.original.slice(from,to),preview.index,red);
         if(from<to)ranges.push(Decoration.replace({widget,inclusive:false}).range(from,to));
         else ranges.push(Decoration.widget({widget,side:-1}).range(from));
       }

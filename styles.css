@@ -5,7 +5,7 @@
 .tc-tools {display:flex;gap:var(--size-4-2);flex-wrap:wrap;margin:var(--size-4-3) 0;}
 .tc-addition,.tc-diff ins {background:none;color:inherit;text-decoration:none;}
 .tc-deletion,.tc-diff del {background:none;text-decoration:line-through;color:var(--text-muted);}
-.tc-red-deletions .tc-deletion,.tc-red-deletions .tc-diff del {color:var(--color-red);background:rgba(var(--color-red-rgb),.13);}
+.tc-red-deletions .tc-deletion,.tc-red-deletions .tc-diff del,.tc-deletion-red {color:var(--color-red);background:rgba(var(--color-red-rgb),.13);text-decoration-color:var(--color-red);}
 .tc-deletion {white-space:pre-wrap;user-select:none;}
 .tc-area-history-marker {color:var(--text-muted);user-select:none;}
 .tc-history,.tc-note-list {display:flex;flex-direction:column;gap:var(--size-4-1);max-height:320px;overflow-y:auto;margin-top:var(--size-4-2);}

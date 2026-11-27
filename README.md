@@ -41,6 +41,8 @@ Revision markers are editor decorations: they are never inserted into your Markd
 
 Run **Track Changes: Toggle red for deletions** from the command palette to switch struck-through text between neutral and red styling. The **Red deletions** switch in plugin settings controls the same saved preference. Current text remains uncolored. The option also applies to in-place historical previews and full-note comparisons.
 
+When red deletions are enabled, removed words themselves stay visible in red with a red strikethrough as you delete. The color and strike are applied directly to the deleted-text elements so editor theme rules cannot replace them with gray text. This feedback does not add a separate paragraph marker or alter the saved note text.
+
 Updating to 0.6.0 preserves existing comparison baselines and archived revisions. Old text is compared against that baseline, which is the first captured version for new notes or the previously accepted version for notes reviewed in older releases. Removing Accept / Reject controls does not reset or erase that state.
 
 ## Storage and limits

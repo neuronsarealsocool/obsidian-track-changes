@@ -11,6 +11,7 @@ import {acceptReviewArea} from './review-areas';
 import {TextRange} from './area-history';
 import {repairAcceptedHistory} from './acceptance-repair';
 import {MobileJournalReader, mobileTime} from './mobile-journal';
+import {styleDeletion} from './deletion-style';
 
 const VIEW='track-changes-review';
 // Obsidian does not await unload hooks. Share the final flush promise across
@@ -199,11 +200,11 @@ export default class TrackChanges extends Plugin {
 }
 
 function button(parent:HTMLElement,text:string,action:()=>unknown,primary=false){const b=parent.createEl('button',{text,cls:primary?'mod-cta':''});b.addEventListener('click',()=>{b.disabled=true;Promise.resolve().then(action).catch(e=>new Notice(String(e),9000)).finally(()=>b.disabled=false);});return b;}
-function showDiff(parent:HTMLElement,before:string,after:string){
+function showDiff(parent:HTMLElement,before:string,after:string,red=false){
   const el=parent.createDiv({cls:'tc-diff'});
   const parts=before.length+after.length>400000?undefined:diffWordsWithSpace(before,after,{timeout:200});
   if(!parts){el.createEl('p',{text:'Large revision: complete text shown below. Recover as copy to compare in an editor.'});el.createEl('pre',{text:after});return;}
-  for(const part of parts)el.createEl(part.added?'ins':part.removed?'del':'span',{text:part.value});
+  for(const part of parts){const element=el.createEl(part.added?'ins':part.removed?'del':'span',{text:part.value});if(part.removed)styleDeletion(element,red);}
 }
 class ReviewView extends ItemView {
   private timer?:number;private disposed=false;private selectedDoc?:string;private allNotes=false;private query='';private page=0;private generation=0;
@@ -262,7 +263,7 @@ class ReviewView extends ItemView {
     const index=names.indexOf(name),previous=names[index+1]?await p.archive.load(r.docId,names[index+1]):undefined;
     if(this.selectionName!==name)return;
     root.createEl('p',{text:previous?'Changes from the preceding saved revision:':'First saved version:',cls:'tc-caption'});
-    showDiff(root,previous?.content??'',r.content);
+    showDiff(root,previous?.content??'',r.content,p.settings.redDeletions);
   }
 }
 class NameModal extends Modal {

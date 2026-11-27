@@ -1227,16 +1227,26 @@ function acceptReviewArea(base, current, change) {
   return before + added + after;
 }
 
+// src/deletion-style.ts
+function styleDeletion(element, red) {
+  element.classList.toggle("tc-deletion-red", red);
+  if (!red) return;
+  element.style.setProperty("color", "var(--color-red)", "important");
+  element.style.setProperty("text-decoration-line", "line-through", "important");
+  element.style.setProperty("text-decoration-color", "var(--color-red)", "important");
+}
+
 // src/inline-review.ts
 var HistoricalText = class extends import_view.WidgetType {
-  constructor(text, current, index) {
+  constructor(text, current, index, red) {
     super();
     this.text = text;
     this.current = current;
     this.index = index;
+    this.red = red;
   }
   eq(other) {
-    return this.text === other.text && this.current === other.current && this.index === other.index;
+    return this.text === other.text && this.current === other.current && this.index === other.index && this.red === other.red;
   }
   toDOM() {
     const el = document.createElement("span");
@@ -1254,6 +1264,7 @@ var HistoricalText = class extends import_view.WidgetType {
       if (change.removed) {
         const removed = document.createElement("del");
         removed.className = "tc-preview-deletion tc-deletion";
+        styleDeletion(removed, this.red);
         removed.textContent = change.removed;
         removed.setAttribute("aria-label", `Current text removed in this preview: ${change.removed}`);
         text.appendChild(removed);
@@ -1281,17 +1292,19 @@ var HistoricalText = class extends import_view.WidgetType {
   }
 };
 var DeletedText = class extends import_view.WidgetType {
-  constructor(text, areaIndex) {
+  constructor(text, areaIndex, red) {
     super();
     this.text = text;
     this.areaIndex = areaIndex;
+    this.red = red;
   }
   eq(other) {
-    return other.text === this.text && other.areaIndex === this.areaIndex;
+    return other.text === this.text && other.areaIndex === this.areaIndex && other.red === this.red;
   }
   toDOM() {
     const span = document.createElement("span");
     span.className = "tc-deletion";
+    styleDeletion(span, this.red);
     span.textContent = this.text;
     span.dataset.tcArea = String(this.areaIndex);
     span.setAttribute("aria-label", `Deleted: ${this.text}`);
@@ -1488,12 +1501,12 @@ function reviewExtension(host) {
       for (const c of raw) {
         const areaIndex = c.areaIndex;
         if (preview && areaIndex === preview.index) continue;
-        if (c.removed) ranges.push(import_view.Decoration.widget({ widget: new DeletedText(c.removed, areaIndex), side: -1 }).range(c.from));
+        if (c.removed) ranges.push(import_view.Decoration.widget({ widget: new DeletedText(c.removed, areaIndex, red), side: -1 }).range(c.from));
         if (c.to > c.from) ranges.push(import_view.Decoration.mark({ class: "tc-addition", attributes: { "data-tc-area": String(areaIndex) } }).range(c.from, c.to));
       }
       if (preview) {
         const { from, to } = preview.range;
-        const widget = new HistoricalText(preview.text, preview.original.slice(from, to), preview.index);
+        const widget = new HistoricalText(preview.text, preview.original.slice(from, to), preview.index, red);
         if (from < to) ranges.push(import_view.Decoration.replace({ widget, inclusive: false }).range(from, to));
         else ranges.push(import_view.Decoration.widget({ widget, side: -1 }).range(from));
       }
@@ -2084,7 +2097,7 @@ function button(parent, text, action, primary = false) {
   });
   return b;
 }
-function showDiff(parent, before, after) {
+function showDiff(parent, before, after, red = false) {
   const el = parent.createDiv({ cls: "tc-diff" });
   const parts = before.length + after.length > 4e5 ? void 0 : diffWordsWithSpace(before, after, { timeout: 200 });
   if (!parts) {
@@ -2092,7 +2105,10 @@ function showDiff(parent, before, after) {
     el.createEl("pre", { text: after });
     return;
   }
-  for (const part of parts) el.createEl(part.added ? "ins" : part.removed ? "del" : "span", { text: part.value });
+  for (const part of parts) {
+    const element = el.createEl(part.added ? "ins" : part.removed ? "del" : "span", { text: part.value });
+    if (part.removed) styleDeletion(element, red);
+  }
 }
 var ReviewView = class extends import_obsidian2.ItemView {
   constructor(leaf, plugin) {
@@ -2230,7 +2246,7 @@ var ReviewView = class extends import_obsidian2.ItemView {
     const index = names.indexOf(name), previous = names[index + 1] ? await p.archive.load(r.docId, names[index + 1]) : void 0;
     if (this.selectionName !== name) return;
     root.createEl("p", { text: previous ? "Changes from the preceding saved revision:" : "First saved version:", cls: "tc-caption" });
-    showDiff(root, previous?.content ?? "", r.content);
+    showDiff(root, previous?.content ?? "", r.content, p.settings.redDeletions);
   }
 };
 var NameModal = class extends import_obsidian2.Modal {

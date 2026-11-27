@@ -60,6 +60,12 @@
     cm=new View({state,parent:mount});
     const fixtureEditor=instance.editorFor;
     instance.editorFor=notePath=>notePath==='inline-fixture.md'?{getValue:()=>cm.state.doc.toString(),setValue:value=>cm.dispatch({changes:{from:0,to:cm.state.doc.length,insert:value}})}:fixtureEditor(notePath);
+    await instance.setRedDeletions(true);cm.dispatch({});
+    const deletionStart=initial.indexOf('original');cm.dispatch({changes:{from:deletionStart,to:deletionStart+'original '.length}});
+    const immediateDeletion=mount.querySelector('.tc-deletion');
+    assert(immediateDeletion?.textContent.includes('original')&&immediateDeletion.classList.contains('tc-deletion-red')&&getComputedStyle(immediateDeletion).textDecorationLine.includes('line-through'),'Deleting text immediately shows the removed words in red with strikethrough');
+    assert(!mount.querySelector('.tc-paragraph-marker,.tc-changed-paragraph'),'Deletion feedback uses the removed words without additional paragraph indicators');
+    cm.dispatch({changes:{from:0,to:cm.state.doc.length,insert:initial}});await instance.setRedDeletions(false);cm.dispatch({});
     cm.dispatch({changes:{from:0,to:cm.state.doc.length,insert:edited}});
     assert(!!mount.querySelector('.tc-addition'),'Changed current text retains an invisible hover target');
     const currentMarker=mount.querySelector('.tc-addition'),oldMarker=mount.querySelector('.tc-deletion');
@@ -71,6 +77,12 @@
     const redMarker=mount.querySelector('.tc-deletion');
     assert(getComputedStyle(redMarker).color!==neutralColor&&getComputedStyle(redMarker).backgroundColor!=='rgba(0, 0, 0, 0)'&&getComputedStyle(redMarker).textDecorationLine.includes('line-through'),'Red deletion mode colors struck-through text red');
     assert(getComputedStyle(mount.querySelector('.tc-addition')).backgroundColor==='rgba(0, 0, 0, 0)'&&savedSettings.redDeletions===true,'Red deletion mode persists without coloring additions');
+    const redColor=getComputedStyle(redMarker).color,redStrike=getComputedStyle(redMarker).textDecorationColor;
+    const competingTheme=document.createElement('style');competingTheme.textContent='.tc-color-conflict .cm-editor .cm-content .tc-deletion {color:var(--text-muted);text-decoration-line:none;text-decoration-color:var(--text-muted);}';mount.appendChild(competingTheme);mount.classList.add('tc-color-conflict');
+    assert(getComputedStyle(redMarker).color===redColor&&getComputedStyle(redMarker).textDecorationColor===redStrike&&getComputedStyle(redMarker).textDecorationLine.includes('line-through'),'Deleted words retain red text and a red strikethrough under conflicting theme styles');
+    cm.dom.classList.remove('tc-red-deletions');
+    assert(getComputedStyle(redMarker).color===redColor&&getComputedStyle(redMarker).textDecorationLine.includes('line-through'),'Red deletion styling stays attached to deleted words without an editor wrapper class');
+    cm.dom.classList.add('tc-red-deletions');competingTheme.remove();mount.classList.remove('tc-color-conflict');
     await instance.setRedDeletions(false);cm.dispatch({});
     assert(getComputedStyle(mount.querySelector('.tc-deletion')).color===neutralColor&&cm.state.doc.toString()===edited,'Turning red deletions off restores neutral styling without editing the note');
     assert([...mount.querySelectorAll('.tc-deletion')].some(el=>el.textContent.length>0),'Inline deletion decoration renders');
