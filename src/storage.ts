@@ -4,12 +4,13 @@ import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {gzipSync,gunzipSync} from 'node:zlib';
 import {mapAreaRange} from './area-history';
+import {DeletionMark,sameDeletions,trackDeletions} from './deletions';
 import {archiveDirectoryName,dateStamp,documentId,revisionName,revisionTime,safeName,sortRevisions} from './archive-names';
 export interface SavedArea {id:string;from:number;to:number;previousText:string}
 export interface AreaRestore {id:string;before:{from:number;to:number};after:{from:number;to:number};beforeRevisionId:string;previousText:string}
 export type AreaTransition=Omit<AreaRestore,'previousText'>;
 export interface MobileSource {id:string;deviceId:string;capturedAt:string;modifiedAt:number;day:string;basis:string;}
-export interface Revision {schema:1;id:string;docId:string;time:string;path:string;aliases:string[];kind:string;content:string;baseline:string;deleted:boolean;label?:string;source?:MobileSource;areaAnchors?:SavedArea[];areaRestore?:AreaRestore;areaChanges?:AreaTransition[]}
+export interface Revision {schema:1;id:string;docId:string;time:string;path:string;aliases:string[];kind:string;content:string;baseline:string;deleted:boolean;label?:string;source?:MobileSource;areaAnchors?:SavedArea[];areaRestore?:AreaRestore;areaChanges?:AreaTransition[];deletions?:DeletionMark[]}
 export class Archive {
   readonly docs=new Map<string,Revision>(); readonly active=new Map<string,string>();
   private queue:Promise<unknown>=Promise.resolve();
@@ -54,6 +55,7 @@ export class Archive {
     if(r.areaAnchors!==undefined&&(!Array.isArray(r.areaAnchors)||r.areaAnchors.some((area:any)=>!range(area,r.content.length)||typeof area.id!=='string'||typeof area.previousText!=='string')))throw Error('Invalid area history markers');
     if(r.areaRestore!==undefined){const area=r.areaRestore;if(!range(area.before)||!range(area.after,r.content.length)||typeof area.id!=='string'||typeof area.beforeRevisionId!=='string'||typeof area.previousText!=='string')throw Error('Invalid area restoration');}
     if(r.areaChanges!==undefined&&(!Array.isArray(r.areaChanges)||r.areaChanges.some((area:any)=>!range(area.before)||!range(area.after,r.content.length)||typeof area.id!=='string'||typeof area.beforeRevisionId!=='string')))throw Error('Invalid area transitions');
+    if(r.deletions!==undefined&&(!Array.isArray(r.deletions)||r.deletions.some((mark:any)=>!Number.isSafeInteger(mark.from)||mark.from<0||mark.from>r.content.length||typeof mark.text!=='string'||(mark.block!==undefined&&typeof mark.block!=='boolean')||(mark.originText!==undefined&&typeof mark.originText!=='string'))))throw Error('Invalid deleted text markers');
     return r;
   }
   async list(docId:string){return sortRevisions(await fs.readdir(this.directory(docId)));}
@@ -94,7 +96,7 @@ export class Archive {
       if(target!==oldRoot){await fs.rename(oldRoot,target);this.root=target;}
     }
   }
-  save(notePath:string,content:string,kind='edit',options:{baseline?:string;label?:string;docId?:string;deleted?:boolean;oldPath?:string;areaRestore?:AreaRestore;source?:MobileSource}={}){
+  save(notePath:string,content:string,kind='edit',options:{baseline?:string;label?:string;docId?:string;deleted?:boolean;oldPath?:string;areaRestore?:AreaRestore;source?:MobileSource;deletions?:DeletionMark[]}={}){
     return this.serial(async()=>{
       const old=options.docId?this.docs.get(options.docId):this.get(options.oldPath??notePath);
       if(options.source&&old){
@@ -103,7 +105,11 @@ export class Archive {
         if(ids.has(options.source.id))return old;
       }
       const baseline=options.baseline??old?.baseline??content;
-      if(old && old.content===content && old.baseline===baseline && old.path===notePath && old.deleted===(options.deleted??false) && kind==='edit')return old;
+      let previous=old?.deletions??[];
+      if(options.areaRestore){const before=options.areaRestore.before;previous=previous.filter(mark=>mark.from<before.from||mark.from>before.to);}
+      const programmatic=!!options.areaRestore||kind==='restore'||kind==='reject';
+      const deletions=options.baseline!==undefined&&options.baseline!==old?.baseline?[]:options.deletions??(old?trackDeletions(baseline,old.content,content,programmatic&&!options.areaRestore?[]:previous,!programmatic).marks:[]);
+      if(old && old.content===content && old.baseline===baseline && sameDeletions(old.deletions,deletions)&&old.path===notePath && old.deleted===(options.deleted??false) && kind==='edit')return old;
       const docId=old?.docId??randomUUID();
       const last=old?Number(old.id.split('-')[0]):0;
       const id=`${Math.max(Date.now(),last+1)}-${randomUUID()}`;
@@ -119,7 +125,7 @@ export class Archive {
         const restored=options.areaRestore;
         areaAnchors=[...(areaAnchors??[]).filter(area=>area.id!==restored.id),{id:restored.id,...restored.after,previousText:restored.previousText}];
       }
-      const r:Revision={schema:1,id,docId,time:new Date().toISOString(),path:notePath,aliases:[...new Set([...(old?.aliases??[]),notePath])],kind,content,baseline,deleted:options.deleted??false,...(options.source?{source:options.source}:{}),...(options.label?{label:options.label}:{}),...(areaAnchors?{areaAnchors}:{}),...(options.areaRestore?{areaRestore:options.areaRestore}:{}),...(areaChanges.length?{areaChanges}:{})};
+      const r:Revision={schema:1,id,docId,time:new Date().toISOString(),path:notePath,aliases:[...new Set([...(old?.aliases??[]),notePath])],kind,content,baseline,deleted:options.deleted??false,...(options.source?{source:options.source}:{}),...(options.label?{label:options.label}:{}),...(areaAnchors?{areaAnchors}:{}),...(options.areaRestore?{areaRestore:options.areaRestore}:{}),...(areaChanges.length?{areaChanges}:{}),...(deletions.length?{deletions}:{})};
       const folder=this.folders.get(docId)??await this.availableFolder(`${dateStamp(Number(id.split('-')[0]))} - ${safeName(notePath.split('/').pop()?.replace(/\.md$/i,'')??'Untitled')}`);
       const dir=path.join(this.root,folder);await fs.mkdir(dir,{recursive:true});
       const destination=path.join(dir,revisionName(id)),tmp=`${destination}.tmp`;

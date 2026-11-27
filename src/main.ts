@@ -12,6 +12,7 @@ import {TextRange} from './area-history';
 import {repairAcceptedHistory} from './acceptance-repair';
 import {MobileJournalReader, mobileTime} from './mobile-journal';
 import {styleDeletion} from './deletion-style';
+import type {DeletionMark} from './deletions';
 
 const VIEW='track-changes-review';
 // Obsidian does not await unload hooks. Share the final flush promise across
@@ -19,10 +20,11 @@ const VIEW='track-changes-review';
 const handoffKey=Symbol.for('obsidian-track-changes.archive-handoffs');
 const handoffs:Map<string,Promise<unknown>>=(globalThis as any)[handoffKey]??=((new Map<string,Promise<unknown>>()));
 interface Settings {archiveDirectory:string;archiveSubfolder?:string;highlights:boolean;redDeletions:boolean;saveDelayMs:number}
-interface Pending {content:string;first:number;last:number}
+interface Pending {content:string;first:number;last:number;deletions?:DeletionMark[]}
 export default class TrackChanges extends Plugin {
   settings:Settings={archiveDirectory:path.join(os.homedir(),'Obsidian Track Changes History'),highlights:true,redDeletions:false,saveDelayMs:800};
   archive!:Archive; ready=false; pending=new Map<string,Pending>();lastError='';private lastNotice=0;private stopped=false;
+  reviewMutation?:{path:string;range?:TextRange};
   private startupTimer?:number;private startup?:Promise<void>;
   private changingDirectory=false;
   private mobileReader?:MobileJournalReader;private mobileImport?:Promise<void>;
@@ -73,7 +75,7 @@ export default class TrackChanges extends Plugin {
   report(error:unknown){console.error('Track Changes',error);this.lastError=String(error);if(Date.now()-this.lastNotice>10000){new Notice(`Track Changes could not save history: ${String(error)}. Existing history was preserved.`,12000);this.lastNotice=Date.now();}}
   async capture(notePath:string,content:string,kind='edit',options:Parameters<Archive['save']>[3]={}){
     if(!this.ready)throw Error('History archive is not ready');
-    try{const prior=this.archive.get(notePath)?.baseline;const r=await this.archive.save(notePath,content,kind,options);this.lastError='';if(prior!==r.baseline)this.refreshEditors();this.refreshViews();return r;}catch(e){this.report(e);throw e;}
+    try{const prior=this.archive.get(notePath)?.baseline,pending=this.pending.get(notePath);const r=await this.archive.save(notePath,content,kind,pending?.content===content&&pending.deletions!==undefined&&options.baseline===undefined&&!options.areaRestore?{deletions:pending.deletions,...options}:options);this.lastError='';if(prior!==r.baseline)this.refreshEditors();this.refreshViews();return r;}catch(e){this.report(e);throw e;}
   }
   async captureDisk(file:TFile){
     try{const notePath=file.path,content=await this.app.vault.read(file);if(this.stopped||file.path!==notePath)return;
@@ -83,8 +85,8 @@ export default class TrackChanges extends Plugin {
       await this.capture(notePath,content);
     }catch(e){this.report(e);}
   }
-  schedule(notePath:string,content:string){if(!this.ready)return;const old=this.pending.get(notePath);this.pending.set(notePath,{content,first:old?.first??Date.now(),last:Date.now()});}
-  async flushPath(notePath:string){const item=this.pending.get(notePath);if(!item)return;this.pending.delete(notePath);try{await this.capture(notePath,item.content);}catch{if(!this.pending.has(notePath))this.pending.set(notePath,item);}}
+  schedule(notePath:string,content:string,deletions?:DeletionMark[]){if(!this.ready)return;const old=this.pending.get(notePath);this.pending.set(notePath,{content,first:old?.first??Date.now(),last:Date.now(),deletions:deletions??(old?.content===content?old.deletions:undefined)});}
+  async flushPath(notePath:string){const item=this.pending.get(notePath);if(!item)return;this.pending.delete(notePath);try{await this.capture(notePath,item.content,'edit',item.deletions!==undefined?{deletions:item.deletions}:{});}catch{if(!this.pending.has(notePath))this.pending.set(notePath,item);}}
   async flushDue(){const now=Date.now();for(const [p,item] of this.pending)if(now-item.last>=this.settings.saveDelayMs||now-item.first>=5000)await this.flushPath(p);}
   async flushAll(){for(const p of [...this.pending.keys()])await this.flushPath(p);await this.archive.idle();}
   private updateSettings(patch:Partial<Settings>){
@@ -168,7 +170,7 @@ export default class TrackChanges extends Plugin {
   async replaceSafely(notePath:string,expected:string,next:string,kind:string,areaRestore?:Omit<AreaRestore,'beforeRevisionId'>){
     const preceding=await this.capture(notePath,expected,`before-${kind}`);
     const editor=this.editorFor(notePath);
-    if(editor){if(editor.getValue()!==expected)throw Error('The note changed. Nothing was replaced.');editor.setValue(next);}
+    if(editor){if(editor.getValue()!==expected)throw Error('The note changed. Nothing was replaced.');this.reviewMutation={path:notePath,range:areaRestore?.before};try{editor.setValue(next);}finally{this.reviewMutation=undefined;}}
     else{const file=this.app.vault.getAbstractFileByPath(notePath);if(!(file instanceof TFile))throw Error('Note no longer exists. Use Recover as copy.');await this.app.vault.process(file,current=>{if(current!==expected)throw Error('The note changed. Nothing was replaced.');return next;});}
     this.pending.delete(notePath);await this.capture(notePath,next,kind,areaRestore?{areaRestore:{...areaRestore,beforeRevisionId:preceding.id}}:{});
   }

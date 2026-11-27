@@ -51,6 +51,32 @@
   const waitFor=async(predicate,label)=>{const until=Date.now()+5000;while(!predicate()&&Date.now()<until)await new Promise(r=>setTimeout(r,25));assert(!!predicate(),label);};
   let cm;
   try{
+    const deletionBase='An original sentence.',withLaterWords='An original sentence with extra words.';
+    await instance.capture('later-deletion-fixture.md',deletionBase);await instance.capture('later-deletion-fixture.md',withLaterWords);
+    await instance.setRedDeletions(true);
+    let deletionView=new View({state:State.create({doc:withLaterWords,extensions:[editorInfoField.init(()=>({file:{path:'later-deletion-fixture.md'}})),instance.extension()]}),parent:mount});
+    const oldEditorFor=instance.editorFor;
+    instance.editorFor=notePath=>notePath==='later-deletion-fixture.md'?{getValue:()=>deletionView.state.doc.toString(),setValue:value=>deletionView.dispatch({changes:{from:0,to:deletionView.state.doc.length,insert:value}})}:oldEditorFor(notePath);
+    try{
+      const from=withLaterWords.indexOf(' with');deletionView.dispatch({changes:{from,to:withLaterWords.length-1}});
+      const deleted=()=>Array.from(mount.querySelectorAll('.tc-deletion')).map(el=>el.textContent).join('');
+      assert(deleted().includes('extra words')&&mount.querySelector('.tc-deletion')?.classList.contains('tc-deletion-red'),'Deleting words added after the original version immediately displays those removed words in red');
+      assert(deletionView.state.doc.toString()===deletionBase,'Red deletion text is a display only and does not return removed words to the note');
+      await instance.flushAll();deletionView.dispatch({});
+      assert(deleted().includes('extra words')&&instance.archive.get('later-deletion-fixture.md').deletions?.length,'Autosaving preserves the deleted additions as persistent red deletion marks');
+      deletionView.destroy();deletionView=new View({state:State.create({doc:deletionBase,extensions:[editorInfoField.init(()=>({file:{path:'later-deletion-fixture.md'}})),instance.extension()]}),parent:mount});
+      assert(deleted().includes('extra words'),'Reopening the note preserves red deletion marks for later-added words');
+      mount.querySelector('.tc-deletion').dispatchEvent(new PointerEvent('pointerover',{bubbles:true}));mount.querySelector('[data-action="previous"]').click();
+      await waitFor(()=>mount.querySelector('.tc-inplace-text')?.textContent.includes('extra words'),'A deletion that returns to the original wording still opens its area revisions');
+      mount.querySelector('[data-action="restore-area"]').click();
+      await waitFor(()=>deletionView.state.doc.toString()===withLaterWords&&!mount.querySelector('.tc-inplace-preview'),'A removed later-added version can be restored from its revision controls');
+      assert(!mount.querySelector('.tc-deletion'),'Restoring deleted additions clears their deletion display');
+      await instance.flushAll();
+      const unsaved=' brand new';deletionView.dispatch({changes:{from:withLaterWords.length-1,insert:unsaved}});deletionView.dispatch({changes:{from:withLaterWords.length-1,to:withLaterWords.length-1+unsaved.length}});
+      assert(deleted().includes('brand new'),'Deleting newly typed words before autosave also displays them in red');
+      await instance.flushAll();const doc=instance.archive.get('later-deletion-fixture.md');const records=await Promise.all((await instance.archive.list(doc.docId)).map(name=>instance.archive.load(doc.docId,name)));
+      assert(records.some(r=>r.kind==='before-deletion'&&r.content.includes('brand new')),'The complete note immediately before a new-text deletion is retained in history');
+    }finally{deletionView.destroy();instance.editorFor=oldEditorFor;await instance.setRedDeletions(false);}
     const initial='That is the original introduction.\n\nA second paragraph stays here.\n\nThe final paragraph is unchanged.';
     const edited='That is the revised introduction.\n\nA second paragraph now has a change.\n\nThe final paragraph has a new ending.';
     const earlierArea='That is the earlier introduction.\nA second historical line.';

@@ -2,8 +2,9 @@ import {diffArrays} from 'diff';
 import {Change,acceptOne,changes} from './changes';
 import {Paragraph,paragraphs} from './paragraphs';
 import type {SavedArea} from './storage';
+import type {DeletionMark} from './deletions';
 
-export interface ReviewArea extends Change {anchor:number;paragraphFrom?:number;paragraphTo?:number;oldParagraphFrom?:number;oldParagraphTo?:number;historyId?:string;operation?:'body'|'separator'|'insert'|'delete'}
+export interface ReviewArea extends Change {anchor:number;paragraphFrom?:number;paragraphTo?:number;oldParagraphFrom?:number;oldParagraphTo?:number;historyId?:string;deletedTextOrigin?:string;operation?:'body'|'separator'|'insert'|'delete'}
 interface Pending {area:ReviewArea;kind:'body'|'separator'|'insert'|'delete';paragraph?:number}
 
 /** Restored areas remain browseable even if they now match the comparison text. */
@@ -19,6 +20,22 @@ export function historyReviewAreas(base:string,current:string,saved:SavedArea[]=
     areas.push({from:anchor.from,to:anchor.to,oldFrom:0,oldTo:anchor.previousText.length,removed:anchor.previousText,added:current.slice(anchor.from,anchor.to),anchor:anchor.to,paragraphFrom:anchor.from,paragraphTo:anchor.to,historyId:anchor.id});
   }
   return areas.sort((a,b)=>a.from-b.from||a.oldFrom-b.oldFrom);
+}
+
+export function deletionReviewAreas(base:string,current:string,saved:SavedArea[]|undefined,marks:DeletionMark[]){
+  const areas=historyReviewAreas(base,current,saved),blocks=paragraphs(current),tracked:{mark:DeletionMark;area:ReviewArea}[]=[];
+  for(const mark of marks){
+    let area=areas.find(a=>mark.block?a.from===mark.from&&a.to===mark.from&&a.removed===mark.text:a.paragraphFrom!==undefined&&a.paragraphFrom<=mark.from&&a.paragraphTo!>=mark.from);
+    if(!area){
+      const paragraph=mark.block?undefined:blocks.find(p=>p.from<=mark.from&&mark.from<=p.bodyTo);
+      const from=paragraph?.from??mark.from,to=paragraph?.bodyTo??mark.from;
+      area={from,to,oldFrom:0,oldTo:0,removed:'',added:current.slice(from,to),anchor:to,...(paragraph?{paragraphFrom:from,paragraphTo:to}:{deletedTextOrigin:mark.originText??mark.text})};
+      areas.push(area);
+    }
+    tracked.push({mark,area});
+  }
+  areas.sort((a,b)=>a.from-b.from||a.oldFrom-b.oldFrom);
+  return {areas,tracked:tracked.map(({mark,area})=>({mark,areaIndex:areas.indexOf(area)}))};
 }
 
 /** Align paragraphs first. Word diffs cannot cross current paragraph bodies. */

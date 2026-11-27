@@ -43,6 +43,8 @@ Run **Track Changes: Toggle red for deletions** from the command palette to swit
 
 When red deletions are enabled, removed words themselves stay visible in red with a red strikethrough as you delete. The color and strike are applied directly to the deleted-text elements so editor theme rules cannot replace them with gray text. This feedback does not add a separate paragraph marker or alter the saved note text.
 
+Deleting words added after the original comparison version also retains those words as deleted text. This works for saved additions and words typed and deleted before autosave. Consecutive Backspace / Delete presses keep the removed text in reading order. Deletion marks persist in the archive across saves and restarts; undoing or restoring removed words clears the corresponding marks. The complete note before a deletion of later-added text is saved to history. Ambiguous repeated deleted paragraphs remain available through full-note history rather than being matched to another copy.
+
 Updating to 0.6.0 preserves existing comparison baselines and archived revisions. Old text is compared against that baseline, which is the first captured version for new notes or the previously accepted version for notes reviewed in older releases. Removing Accept / Reject controls does not reset or erase that state.
 
 ## Storage and limits

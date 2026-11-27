@@ -79,7 +79,7 @@ export class AreaHistory {
   private readonly docId?:string;
   private deletionOrigin?:AreaOrigin;
   private restored?:AreaTransition;
-  constructor(readonly source:AreaHistorySource,path:string,text:string,readonly currentRange:TextRange,origin?:AreaOrigin,private areaId?:string){
+  constructor(readonly source:AreaHistorySource,path:string,text:string,readonly currentRange:TextRange,origin?:AreaOrigin,private areaId?:string,private deletedTextOrigin?:string){
     this.docId=source.get(path)?.docId;this.document=text;this.range={...currentRange};
     if(currentRange.from===currentRange.to&&origin)this.deletionOrigin=origin;
     this.entries=[{text:text.slice(currentRange.from,currentRange.to),kind:'current'}];
@@ -97,6 +97,14 @@ export class AreaHistory {
       if(!keepReading())return this.selected;
       const revision=await this.source.load(this.docId,this.names[this.cursor]);this.cursor++;
       if(!keepReading())return this.selected;
+      if(this.deletedTextOrigin){
+        const from=revision.content.indexOf(this.deletedTextOrigin);
+        if(from<0)continue;
+        if(from!==revision.content.lastIndexOf(this.deletedTextOrigin)){this.finished=true;this.stopReason='Repeated text makes this deleted area ambiguous. Use full-note history to compare it.';return this.selected;}
+        this.document=revision.content;this.range={from,to:from+this.deletedTextOrigin.length};this.deletedTextOrigin=undefined;
+        this.entries.push({text:revision.content.slice(this.range.from,this.range.to),time:revision.time,id:revision.id,label:revision.label,kind:revision.kind});this.position++;
+        return this.selected;
+      }
       // Explicit restores provide exact boundaries across the saved transition,
       // even when an area was removed or restored to its original wording.
       const restoration=this.restored;

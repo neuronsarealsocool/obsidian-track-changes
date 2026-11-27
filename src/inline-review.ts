@@ -2,16 +2,18 @@ import {Notice,editorInfoField} from 'obsidian';
 import {EditorState,Range,StateEffect,StateField} from '@codemirror/state';
 import {Decoration,DecorationSet,EditorView,ViewPlugin,ViewUpdate,WidgetType} from '@codemirror/view';
 import {Change,changes} from './changes';
-import {ReviewArea,historyReviewAreas} from './review-areas';
+import {ReviewArea,deletionReviewAreas} from './review-areas';
 import type {SavedArea} from './storage';
 import {AreaHistory,AreaHistorySource,areaRange,mapAreaRange,TextRange} from './area-history';
 import {styleDeletion} from './deletion-style';
+import {DeletionMark,sameDeletions,trackDeletions} from './deletions';
 
 interface ReviewHost {
   settings:{highlights:boolean;redDeletions?:boolean};
-  archive:{get:(path:string)=>{baseline:string;docId:string;content:string;areaAnchors?:SavedArea[]}|undefined;list:AreaHistorySource['list'];load:AreaHistorySource['load']};
-  capture:(path:string,text:string)=>Promise<unknown>;
-  schedule:(path:string,text:string)=>void;
+  archive:{get:(path:string)=>{baseline:string;docId:string;content:string;areaAnchors?:SavedArea[];deletions?:DeletionMark[]}|undefined;list:AreaHistorySource['list'];load:AreaHistorySource['load']};
+  capture:(path:string,text:string,kind?:string)=>Promise<unknown>;
+  schedule:(path:string,text:string,deletions?:DeletionMark[])=>void;
+  reviewMutation?:{path:string;range?:TextRange};
   restoreAreaVersion:(path:string,expected:string,base:string,range:TextRange,text:string)=>Promise<void>;
 }
 interface InPlacePreview {path:string;base:string;original:string;index:number;range:TextRange;text:string}
@@ -57,8 +59,8 @@ class ReviewBox extends WidgetType {
       button.setAttribute('aria-label',action==='previous'?'Previous revision of this area':action==='next'?'Next revision of this area':`${label} this changed area`);
       button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();void run();});parent.appendChild(button);return button;
     };
-    const origin=this.area.paragraphFrom===undefined&&this.area.from===this.area.to?{document:this.base,range:{from:this.area.oldFrom,to:this.area.oldTo}}:undefined;
-    const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area),origin,this.area.historyId);
+    const origin=!this.area.deletedTextOrigin&&this.area.paragraphFrom===undefined&&this.area.from===this.area.to?{document:this.base,range:{from:this.area.oldFrom,to:this.area.oldTo}}:undefined;
+    const history=new AreaHistory(this.host.archive,this.path,this.text,areaRange(this.text,this.area),origin,this.area.historyId,this.area.deletedTextOrigin);
     const section=document.createElement('div');section.className='tc-area-history';card.appendChild(section);
     const historyTitle=document.createElement('div');historyTitle.className='tc-area-history-title';historyTitle.textContent='This area’s revisions';section.appendChild(historyTitle);
     const status=document.createElement('div');status.className='tc-area-history-status';status.setAttribute('aria-live','polite');section.appendChild(status);
@@ -103,19 +105,22 @@ class ReviewBox extends WidgetType {
 }
 
 interface AreaChange extends Change {areaIndex:number}
-interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;enabled:boolean;red:boolean;saved?:SavedArea[];hovered:number|null;areas:ReviewArea[];raw:AreaChange[];preview:InPlacePreview|null}
+interface ReviewState {decorations:DecorationSet;text:string;base?:string;path?:string;docId?:string;enabled:boolean;red:boolean;saved?:SavedArea[];recordedDeletions?:DeletionMark[];deletions:DeletionMark[];capturedDeletion:boolean;hovered:number|null;areas:ReviewArea[];raw:AreaChange[];preview:InPlacePreview|null}
 export function reviewExtension(host:ReviewHost){
   const reveal=StateEffect.define<number|null>();
   const previewEffect=StateEffect.define<InPlacePreview|null>();
   const samePreview=(a:InPlacePreview|null,b:InPlacePreview|null)=>a===b||!!a&&!!b&&a.path===b.path&&a.base===b.base&&a.original===b.original&&a.index===b.index&&a.range.from===b.range.from&&a.range.to===b.range.to&&a.text===b.text;
   const setPreview:SetPreview=(view,preview)=>{if(!samePreview(view.state.field(field).preview,preview))view.dispatch({effects:previewEffect.of(preview)});};
   const reopen=(view:EditorView,range:TextRange)=>{const index=view.state.field(field).areas.findIndex(area=>area.historyId&&area.paragraphFrom===range.from&&area.paragraphTo===range.to);if(index>=0)view.dispatch({effects:reveal.of(index)});};
-  function build(state:EditorState,previous?:ReviewState,requested:number|null=null,requestedPreview:InPlacePreview|null=null):ReviewState{
+  function build(state:EditorState,previous?:ReviewState,requested:number|null=null,requestedPreview:InPlacePreview|null=null,liveDeletions?:DeletionMark[],capturedDeletion=false):ReviewState{
     const path=state.field(editorInfoField,false)?.file?.path,record=path?host.archive.get(path):undefined,base=record?.baseline,saved=record?.areaAnchors;
     const text=state.doc.toString(),enabled=host.settings.highlights,red=!!host.settings.redDeletions;
-    const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.enabled===enabled&&previous.red===red&&previous.saved===saved;
+    const recordedDeletions=record?.deletions;
+    const deletions=liveDeletions??(previous&&previous.text===text&&previous.path===path&&previous.docId===record?.docId&&previous.base===base&&previous.recordedDeletions===recordedDeletions?previous.deletions:record&&record.content!==text?trackDeletions(base??record.content,record.content,text,recordedDeletions).marks:recordedDeletions??[]);
+    const unchanged=previous&&previous.text===text&&previous.base===base&&previous.path===path&&previous.docId===record?.docId&&previous.enabled===enabled&&previous.red===red&&previous.saved===saved&&sameDeletions(previous.deletions,deletions);
     const currentSaved=record&&record.content!==text?saved?.flatMap(area=>{const mapped=mapAreaRange(record.content,text,area);if(!mapped.range)return [];if(area.from===area.to)mapped.range.to=mapped.range.from;return [{...area,...mapped.range}];}):saved;
-    const areas=unchanged?previous.areas:enabled&&base!==undefined&&text.length+base.length<=150000?historyReviewAreas(base,text,currentSaved):[];
+    const review=enabled&&base!==undefined&&text.length+base.length<=150000?deletionReviewAreas(base,text,currentSaved,deletions):{areas:[],tracked:[]};
+    const areas=unchanged?previous.areas:review.areas;
     const raw=unchanged?previous.raw:areas.flatMap((area,areaIndex)=>changes(area.removed,area.added,true).map(c=>({...c,from:c.from+area.from,to:c.to+area.from,oldFrom:c.oldFrom+area.oldFrom,oldTo:c.oldTo+area.oldFrom,areaIndex})));
     const requestedArea=requested===null?undefined:previous?.areas[requested];
     const refreshedIndex=requestedArea&&previous?.text===text&&previous.base===base&&previous.path===path?areas.findIndex(area=>requestedArea.historyId?area.historyId===requestedArea.historyId:area.from===requestedArea.from&&area.to===requestedArea.to&&area.removed===requestedArea.removed):-1;
@@ -135,6 +140,10 @@ export function reviewExtension(host:ReviewHost){
         if(c.removed)ranges.push(Decoration.widget({widget:new DeletedText(c.removed,areaIndex,red),side:-1}).range(c.from));
         if(c.to>c.from)ranges.push(Decoration.mark({class:'tc-addition',attributes:{'data-tc-area':String(areaIndex)}}).range(c.from,c.to));
       }
+      for(const {mark,areaIndex} of review.tracked){
+        if(preview?.index===areaIndex||raw.some(c=>c.from===mark.from&&c.removed===mark.text))continue;
+        ranges.push(Decoration.widget({widget:new DeletedText(mark.text,areaIndex,red),side:-1}).range(mark.from));
+      }
       if(preview){
         const {from,to}=preview.range;
         const widget=new HistoricalText(preview.text,preview.original.slice(from,to),preview.index,red);
@@ -143,11 +152,17 @@ export function reviewExtension(host:ReviewHost){
       }
       if(hovered!==null){const area=areas[hovered],anchor=area.from<area.to?areaRange(text,area).to:area.anchor;ranges.push(Decoration.widget({widget:new ReviewBox(host,path,base,text,area,hovered,areas.length,setPreview,reopen),block:true,side:1}).range(state.doc.lineAt(anchor).to));}
     }
-    return {decorations:Decoration.set(ranges,true),text,base,path,enabled,red,saved,hovered,areas,raw,preview};
+    return {decorations:Decoration.set(ranges,true),text,base,path,docId:record?.docId,enabled,red,saved,recordedDeletions,deletions,capturedDeletion,hovered,areas,raw,preview};
   }
   const field=StateField.define<ReviewState>({create:state=>build(state),update:(value,tr)=>{
     let hovered=value.hovered,preview=value.preview;for(const effect of tr.effects){if(effect.is(reveal))hovered=effect.value;if(effect.is(previewEffect))preview=effect.value;}
-    return build(tr.state,value,hovered,preview);
+    let deletions:DeletionMark[]|undefined,captured=false;
+    if(tr.docChanged&&tr.state.field(editorInfoField,false)?.file?.path===value.path&&host.archive.get(value.path!)?.docId===value.docId){
+      const mutation=host.reviewMutation?.path===value.path?host.reviewMutation:undefined;
+      const previous=mutation?mutation.range?value.deletions.filter(mark=>mark.from<mutation.range!.from||mark.from>mutation.range!.to):[]:value.deletions;
+      const tracking=trackDeletions(value.base??value.text,value.text,tr.state.doc.toString(),previous,!mutation);deletions=tracking.marks;captured=tracking.recorded;
+    }
+    return build(tr.state,value,hovered,preview,deletions,captured);
   },provide:f=>[EditorView.decorations.from(f,value=>value.decorations),EditorView.editorAttributes.from(f,value=>({class:value.red?'tc-red-deletions':''}))]});
   // Block widgets must be provided directly by a state field. Capture events
   // stay in a view plugin so rebuilding decorations never performs async work.
@@ -195,7 +210,9 @@ export function reviewExtension(host:ReviewHost){
       const file=update.state.field(editorInfoField,false)?.file;
       if(update.docChanged&&file){
         if(!host.archive.get(file.path))void host.capture(file.path,update.startState.doc.toString()).catch(()=>{});
-        host.schedule(file.path,update.state.doc.toString());
+        const review=update.state.field(field);
+        if(review.capturedDeletion)void host.capture(file.path,update.startState.doc.toString(),'before-deletion').catch(()=>{});
+        host.schedule(file.path,update.state.doc.toString(),review.deletions);
       }
     }
   });

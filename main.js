@@ -665,10 +665,11 @@ function mapAreaRange(newer, older, range) {
   return { range: { from, to } };
 }
 var AreaHistory = class {
-  constructor(source, path3, text, currentRange, origin, areaId) {
+  constructor(source, path3, text, currentRange, origin, areaId, deletedTextOrigin) {
     this.source = source;
     this.currentRange = currentRange;
     this.areaId = areaId;
+    this.deletedTextOrigin = deletedTextOrigin;
     this.docId = source.get(path3)?.docId;
     this.document = text;
     this.range = { ...currentRange };
@@ -715,6 +716,21 @@ var AreaHistory = class {
       const revision = await this.source.load(this.docId, this.names[this.cursor]);
       this.cursor++;
       if (!keepReading()) return this.selected;
+      if (this.deletedTextOrigin) {
+        const from = revision.content.indexOf(this.deletedTextOrigin);
+        if (from < 0) continue;
+        if (from !== revision.content.lastIndexOf(this.deletedTextOrigin)) {
+          this.finished = true;
+          this.stopReason = "Repeated text makes this deleted area ambiguous. Use full-note history to compare it.";
+          return this.selected;
+        }
+        this.document = revision.content;
+        this.range = { from, to: from + this.deletedTextOrigin.length };
+        this.deletedTextOrigin = void 0;
+        this.entries.push({ text: revision.content.slice(this.range.from, this.range.to), time: revision.time, id: revision.id, label: revision.label, kind: revision.kind });
+        this.position++;
+        return this.selected;
+      }
       const restoration = this.restored;
       const transition = () => [...revision.areaRestore ? [revision.areaRestore] : [], ...revision.areaChanges ?? []].find((area) => (!this.areaId || area.id === this.areaId) && area.after.from === this.range.from && area.after.to === this.range.to);
       if (restoration && revision.id !== restoration.beforeRevisionId) continue;
@@ -757,6 +773,61 @@ var AreaHistory = class {
     return this.selected;
   }
 };
+
+// src/deletions.ts
+function sameDeletions(a = [], b = []) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+function trackDeletions(base, before, after, previous = [], record = true) {
+  if (before === after) return { marks: previous, recorded: false };
+  const edits = changes(before, after), additions = record ? changes(base, before).filter((c) => c.added) : [];
+  const absorbed = /* @__PURE__ */ new Set(), fresh = [];
+  const blocks = paragraphs(before);
+  for (const edit of edits) {
+    if (!edit.removed || !additions.some((c) => c.from < edit.oldTo && c.to > edit.oldFrom)) continue;
+    for (const part of paragraphs(edit.removed)) {
+      const from = edit.oldFrom + part.from, to = edit.oldFrom + part.to;
+      let cursor = from, text = "";
+      for (const mark of previous) {
+        if (absorbed.has(mark) || mark.from < from || mark.from > to) continue;
+        text += before.slice(cursor, mark.from) + mark.text;
+        cursor = mark.from;
+        absorbed.add(mark);
+      }
+      text += before.slice(cursor, to);
+      const block = blocks.find((p) => p.from === from && p.bodyTo <= to && p.body.trim());
+      if (text) fresh.push({ from: edit.from, text, ...block ? { block: true, originText: before.slice(block.from, Math.min(block.to, to)) } : {} });
+    }
+  }
+  const mapped = [];
+  for (const mark of previous) {
+    if (absorbed.has(mark)) continue;
+    let from = mark.from, delta = 0, text = mark.text, restored = false;
+    for (const edit of edits) {
+      if (mark.from < edit.oldFrom) break;
+      if (mark.from <= edit.oldTo) {
+        from = edit.from;
+        if (edit.oldFrom === edit.oldTo && edit.added && mark.from === edit.oldFrom) {
+          if (text.startsWith(edit.added)) {
+            text = text.slice(edit.added.length);
+            from = edit.to;
+            restored = true;
+          } else if (text.endsWith(edit.added)) {
+            text = text.slice(0, -edit.added.length);
+            restored = true;
+          }
+        }
+        delta = 0;
+        break;
+      }
+      delta += edit.to - edit.from - (edit.oldTo - edit.oldFrom);
+      from = mark.from + delta;
+    }
+    if (text) mapped.push({ ...mark, from, text, ...restored ? { block: false } : {} });
+  }
+  const marks = [...mapped, ...fresh].sort((a, b) => a.from - b.from);
+  return { marks, recorded: fresh.length > 0 };
+}
 
 // src/archive-names.ts
 var documentId = /^[a-f0-9-]{36}$/;
@@ -880,6 +951,7 @@ var Archive = class _Archive {
       if (!range(area.before) || !range(area.after, r.content.length) || typeof area.id !== "string" || typeof area.beforeRevisionId !== "string" || typeof area.previousText !== "string") throw Error("Invalid area restoration");
     }
     if (r.areaChanges !== void 0 && (!Array.isArray(r.areaChanges) || r.areaChanges.some((area) => !range(area.before) || !range(area.after, r.content.length) || typeof area.id !== "string" || typeof area.beforeRevisionId !== "string"))) throw Error("Invalid area transitions");
+    if (r.deletions !== void 0 && (!Array.isArray(r.deletions) || r.deletions.some((mark) => !Number.isSafeInteger(mark.from) || mark.from < 0 || mark.from > r.content.length || typeof mark.text !== "string" || mark.block !== void 0 && typeof mark.block !== "boolean" || mark.originText !== void 0 && typeof mark.originText !== "string"))) throw Error("Invalid deleted text markers");
     return r;
   }
   async list(docId) {
@@ -977,15 +1049,22 @@ var Archive = class _Archive {
         if (!ids) {
           ids = /* @__PURE__ */ new Set();
           for (const name of await this.list(old.docId)) {
-            const previous = await this.load(old.docId, name);
-            if (previous.source) ids.add(previous.source.id);
+            const previous2 = await this.load(old.docId, name);
+            if (previous2.source) ids.add(previous2.source.id);
           }
           this.mobileIds.set(old.docId, ids);
         }
         if (ids.has(options.source.id)) return old;
       }
       const baseline = options.baseline ?? old?.baseline ?? content;
-      if (old && old.content === content && old.baseline === baseline && old.path === notePath && old.deleted === (options.deleted ?? false) && kind === "edit") return old;
+      let previous = old?.deletions ?? [];
+      if (options.areaRestore) {
+        const before = options.areaRestore.before;
+        previous = previous.filter((mark) => mark.from < before.from || mark.from > before.to);
+      }
+      const programmatic = !!options.areaRestore || kind === "restore" || kind === "reject";
+      const deletions = options.baseline !== void 0 && options.baseline !== old?.baseline ? [] : options.deletions ?? (old ? trackDeletions(baseline, old.content, content, programmatic && !options.areaRestore ? [] : previous, !programmatic).marks : []);
+      if (old && old.content === content && old.baseline === baseline && sameDeletions(old.deletions, deletions) && old.path === notePath && old.deleted === (options.deleted ?? false) && kind === "edit") return old;
       const docId = old?.docId ?? (0, import_node_crypto.randomUUID)();
       const last = old ? Number(old.id.split("-")[0]) : 0;
       const id = `${Math.max(Date.now(), last + 1)}-${(0, import_node_crypto.randomUUID)()}`;
@@ -1002,7 +1081,7 @@ var Archive = class _Archive {
         const restored = options.areaRestore;
         areaAnchors = [...(areaAnchors ?? []).filter((area) => area.id !== restored.id), { id: restored.id, ...restored.after, previousText: restored.previousText }];
       }
-      const r = { schema: 1, id, docId, time: (/* @__PURE__ */ new Date()).toISOString(), path: notePath, aliases: [.../* @__PURE__ */ new Set([...old?.aliases ?? [], notePath])], kind, content, baseline, deleted: options.deleted ?? false, ...options.source ? { source: options.source } : {}, ...options.label ? { label: options.label } : {}, ...areaAnchors ? { areaAnchors } : {}, ...options.areaRestore ? { areaRestore: options.areaRestore } : {}, ...areaChanges.length ? { areaChanges } : {} };
+      const r = { schema: 1, id, docId, time: (/* @__PURE__ */ new Date()).toISOString(), path: notePath, aliases: [.../* @__PURE__ */ new Set([...old?.aliases ?? [], notePath])], kind, content, baseline, deleted: options.deleted ?? false, ...options.source ? { source: options.source } : {}, ...options.label ? { label: options.label } : {}, ...areaAnchors ? { areaAnchors } : {}, ...options.areaRestore ? { areaRestore: options.areaRestore } : {}, ...areaChanges.length ? { areaChanges } : {}, ...deletions.length ? { deletions } : {} };
       const folder = this.folders.get(docId) ?? await this.availableFolder(`${dateStamp(Number(id.split("-")[0]))} - ${safeName(notePath.split("/").pop()?.replace(/\.md$/i, "") ?? "Untitled")}`);
       const dir = import_node_path.default.join(this.root, folder);
       await import_node_fs.promises.mkdir(dir, { recursive: true });
@@ -1127,6 +1206,21 @@ function historyReviewAreas(base, current, saved = []) {
     areas.push({ from: anchor.from, to: anchor.to, oldFrom: 0, oldTo: anchor.previousText.length, removed: anchor.previousText, added: current.slice(anchor.from, anchor.to), anchor: anchor.to, paragraphFrom: anchor.from, paragraphTo: anchor.to, historyId: anchor.id });
   }
   return areas.sort((a, b) => a.from - b.from || a.oldFrom - b.oldFrom);
+}
+function deletionReviewAreas(base, current, saved, marks) {
+  const areas = historyReviewAreas(base, current, saved), blocks = paragraphs(current), tracked = [];
+  for (const mark of marks) {
+    let area = areas.find((a) => mark.block ? a.from === mark.from && a.to === mark.from && a.removed === mark.text : a.paragraphFrom !== void 0 && a.paragraphFrom <= mark.from && a.paragraphTo >= mark.from);
+    if (!area) {
+      const paragraph = mark.block ? void 0 : blocks.find((p) => p.from <= mark.from && mark.from <= p.bodyTo);
+      const from = paragraph?.from ?? mark.from, to = paragraph?.bodyTo ?? mark.from;
+      area = { from, to, oldFrom: 0, oldTo: 0, removed: "", added: current.slice(from, to), anchor: to, ...paragraph ? { paragraphFrom: from, paragraphTo: to } : { deletedTextOrigin: mark.originText ?? mark.text } };
+      areas.push(area);
+    }
+    tracked.push({ mark, area });
+  }
+  areas.sort((a, b) => a.from - b.from || a.oldFrom - b.oldFrom);
+  return { areas, tracked: tracked.map(({ mark, area }) => ({ mark, areaIndex: areas.indexOf(area) })) };
 }
 function reviewAreas(base, current) {
   const old = paragraphs(base), now = paragraphs(current), pending = [];
@@ -1371,8 +1465,8 @@ var ReviewBox = class extends import_view.WidgetType {
       parent.appendChild(button2);
       return button2;
     };
-    const origin = this.area.paragraphFrom === void 0 && this.area.from === this.area.to ? { document: this.base, range: { from: this.area.oldFrom, to: this.area.oldTo } } : void 0;
-    const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area), origin, this.area.historyId);
+    const origin = !this.area.deletedTextOrigin && this.area.paragraphFrom === void 0 && this.area.from === this.area.to ? { document: this.base, range: { from: this.area.oldFrom, to: this.area.oldTo } } : void 0;
+    const history = new AreaHistory(this.host.archive, this.path, this.text, areaRange(this.text, this.area), origin, this.area.historyId, this.area.deletedTextOrigin);
     const section = document.createElement("div");
     section.className = "tc-area-history";
     card.appendChild(section);
@@ -1474,17 +1568,20 @@ function reviewExtension(host) {
     const index = view.state.field(field).areas.findIndex((area) => area.historyId && area.paragraphFrom === range.from && area.paragraphTo === range.to);
     if (index >= 0) view.dispatch({ effects: reveal.of(index) });
   };
-  function build(state, previous, requested = null, requestedPreview = null) {
+  function build(state, previous, requested = null, requestedPreview = null, liveDeletions, capturedDeletion = false) {
     const path3 = state.field(import_obsidian.editorInfoField, false)?.file?.path, record = path3 ? host.archive.get(path3) : void 0, base = record?.baseline, saved = record?.areaAnchors;
     const text = state.doc.toString(), enabled = host.settings.highlights, red = !!host.settings.redDeletions;
-    const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.enabled === enabled && previous.red === red && previous.saved === saved;
+    const recordedDeletions = record?.deletions;
+    const deletions = liveDeletions ?? (previous && previous.text === text && previous.path === path3 && previous.docId === record?.docId && previous.base === base && previous.recordedDeletions === recordedDeletions ? previous.deletions : record && record.content !== text ? trackDeletions(base ?? record.content, record.content, text, recordedDeletions).marks : recordedDeletions ?? []);
+    const unchanged = previous && previous.text === text && previous.base === base && previous.path === path3 && previous.docId === record?.docId && previous.enabled === enabled && previous.red === red && previous.saved === saved && sameDeletions(previous.deletions, deletions);
     const currentSaved = record && record.content !== text ? saved?.flatMap((area) => {
       const mapped = mapAreaRange(record.content, text, area);
       if (!mapped.range) return [];
       if (area.from === area.to) mapped.range.to = mapped.range.from;
       return [{ ...area, ...mapped.range }];
     }) : saved;
-    const areas = unchanged ? previous.areas : enabled && base !== void 0 && text.length + base.length <= 15e4 ? historyReviewAreas(base, text, currentSaved) : [];
+    const review = enabled && base !== void 0 && text.length + base.length <= 15e4 ? deletionReviewAreas(base, text, currentSaved, deletions) : { areas: [], tracked: [] };
+    const areas = unchanged ? previous.areas : review.areas;
     const raw = unchanged ? previous.raw : areas.flatMap((area, areaIndex) => changes(area.removed, area.added, true).map((c) => ({ ...c, from: c.from + area.from, to: c.to + area.from, oldFrom: c.oldFrom + area.oldFrom, oldTo: c.oldTo + area.oldFrom, areaIndex })));
     const requestedArea = requested === null ? void 0 : previous?.areas[requested];
     const refreshedIndex = requestedArea && previous?.text === text && previous.base === base && previous.path === path3 ? areas.findIndex((area) => requestedArea.historyId ? area.historyId === requestedArea.historyId : area.from === requestedArea.from && area.to === requestedArea.to && area.removed === requestedArea.removed) : -1;
@@ -1504,6 +1601,10 @@ function reviewExtension(host) {
         if (c.removed) ranges.push(import_view.Decoration.widget({ widget: new DeletedText(c.removed, areaIndex, red), side: -1 }).range(c.from));
         if (c.to > c.from) ranges.push(import_view.Decoration.mark({ class: "tc-addition", attributes: { "data-tc-area": String(areaIndex) } }).range(c.from, c.to));
       }
+      for (const { mark, areaIndex } of review.tracked) {
+        if (preview?.index === areaIndex || raw.some((c) => c.from === mark.from && c.removed === mark.text)) continue;
+        ranges.push(import_view.Decoration.widget({ widget: new DeletedText(mark.text, areaIndex, red), side: -1 }).range(mark.from));
+      }
       if (preview) {
         const { from, to } = preview.range;
         const widget = new HistoricalText(preview.text, preview.original.slice(from, to), preview.index, red);
@@ -1515,7 +1616,7 @@ function reviewExtension(host) {
         ranges.push(import_view.Decoration.widget({ widget: new ReviewBox(host, path3, base, text, area, hovered, areas.length, setPreview, reopen), block: true, side: 1 }).range(state.doc.lineAt(anchor).to));
       }
     }
-    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, enabled, red, saved, hovered, areas, raw, preview };
+    return { decorations: import_view.Decoration.set(ranges, true), text, base, path: path3, docId: record?.docId, enabled, red, saved, recordedDeletions, deletions, capturedDeletion, hovered, areas, raw, preview };
   }
   const field = import_state.StateField.define({ create: (state) => build(state), update: (value, tr) => {
     let hovered = value.hovered, preview = value.preview;
@@ -1523,7 +1624,15 @@ function reviewExtension(host) {
       if (effect.is(reveal)) hovered = effect.value;
       if (effect.is(previewEffect)) preview = effect.value;
     }
-    return build(tr.state, value, hovered, preview);
+    let deletions, captured = false;
+    if (tr.docChanged && tr.state.field(import_obsidian.editorInfoField, false)?.file?.path === value.path && host.archive.get(value.path)?.docId === value.docId) {
+      const mutation = host.reviewMutation?.path === value.path ? host.reviewMutation : void 0;
+      const previous = mutation ? mutation.range ? value.deletions.filter((mark) => mark.from < mutation.range.from || mark.from > mutation.range.to) : [] : value.deletions;
+      const tracking = trackDeletions(value.base ?? value.text, value.text, tr.state.doc.toString(), previous, !mutation);
+      deletions = tracking.marks;
+      captured = tracking.recorded;
+    }
+    return build(tr.state, value, hovered, preview, deletions, captured);
   }, provide: (f) => [import_view.EditorView.decorations.from(f, (value) => value.decorations), import_view.EditorView.editorAttributes.from(f, (value) => ({ class: value.red ? "tc-red-deletions" : "" }))] });
   const capture = import_view.ViewPlugin.fromClass(class {
     constructor(view) {
@@ -1612,7 +1721,10 @@ function reviewExtension(host) {
       if (update.docChanged && file) {
         if (!host.archive.get(file.path)) void host.capture(file.path, update.startState.doc.toString()).catch(() => {
         });
-        host.schedule(file.path, update.state.doc.toString());
+        const review = update.state.field(field);
+        if (review.capturedDeletion) void host.capture(file.path, update.startState.doc.toString(), "before-deletion").catch(() => {
+        });
+        host.schedule(file.path, update.state.doc.toString(), review.deletions);
       }
     }
   });
@@ -1727,6 +1839,7 @@ var TrackChanges = class extends import_obsidian2.Plugin {
   lastError = "";
   lastNotice = 0;
   stopped = false;
+  reviewMutation;
   startupTimer;
   startup;
   changingDirectory = false;
@@ -1828,8 +1941,8 @@ var TrackChanges = class extends import_obsidian2.Plugin {
   async capture(notePath, content, kind = "edit", options = {}) {
     if (!this.ready) throw Error("History archive is not ready");
     try {
-      const prior = this.archive.get(notePath)?.baseline;
-      const r = await this.archive.save(notePath, content, kind, options);
+      const prior = this.archive.get(notePath)?.baseline, pending = this.pending.get(notePath);
+      const r = await this.archive.save(notePath, content, kind, pending?.content === content && pending.deletions !== void 0 && options.baseline === void 0 && !options.areaRestore ? { deletions: pending.deletions, ...options } : options);
       this.lastError = "";
       if (prior !== r.baseline) this.refreshEditors();
       this.refreshViews();
@@ -1854,17 +1967,17 @@ var TrackChanges = class extends import_obsidian2.Plugin {
       this.report(e);
     }
   }
-  schedule(notePath, content) {
+  schedule(notePath, content, deletions) {
     if (!this.ready) return;
     const old = this.pending.get(notePath);
-    this.pending.set(notePath, { content, first: old?.first ?? Date.now(), last: Date.now() });
+    this.pending.set(notePath, { content, first: old?.first ?? Date.now(), last: Date.now(), deletions: deletions ?? (old?.content === content ? old.deletions : void 0) });
   }
   async flushPath(notePath) {
     const item = this.pending.get(notePath);
     if (!item) return;
     this.pending.delete(notePath);
     try {
-      await this.capture(notePath, item.content);
+      await this.capture(notePath, item.content, "edit", item.deletions !== void 0 ? { deletions: item.deletions } : {});
     } catch {
       if (!this.pending.has(notePath)) this.pending.set(notePath, item);
     }
@@ -2037,7 +2150,12 @@ var TrackChanges = class extends import_obsidian2.Plugin {
     const editor = this.editorFor(notePath);
     if (editor) {
       if (editor.getValue() !== expected) throw Error("The note changed. Nothing was replaced.");
-      editor.setValue(next);
+      this.reviewMutation = { path: notePath, range: areaRestore?.before };
+      try {
+        editor.setValue(next);
+      } finally {
+        this.reviewMutation = void 0;
+      }
     } else {
       const file = this.app.vault.getAbstractFileByPath(notePath);
       if (!(file instanceof import_obsidian2.TFile)) throw Error("Note no longer exists. Use Recover as copy.");
